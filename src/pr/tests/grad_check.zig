@@ -186,7 +186,7 @@ pub fn make_test_inputs(
 
 fn build_func(program: *pr.Program, b: *pr.FunctionBuilder, returns: []const *pr.Var) !pr.Function {
     const func = try b.finish(returns);
-    try program.add_function(func);
+    _ = try program.add_function(func);
     return func;
 }
 

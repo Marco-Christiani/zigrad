@@ -106,7 +106,7 @@ pub fn requested_providers(owner: anytype) AnnotationError!?ProviderRequest {
 
 /// Reject provider requests that have not been outlined into functions.
 pub fn require_outlined_requests(program: *const pr.Program) AnnotationError!void {
-    for (program.functions) |func| {
+    for (program.functions()) |func| {
         for (func.regions) |region| {
             if (try requested_providers(region) != null) {
                 return error.ProviderRegionNotOutlined;

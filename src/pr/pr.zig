@@ -347,8 +347,25 @@ pub const ReduceParams = struct {
     operation: Reduction,
 };
 
+/// Identity of a registered function within a `Program`.
+///
+/// Appending or replacing functions preserves existing identities. An identity
+///  assigned to a removed function is not reused by the same program.
+pub const FunctionId = enum(u32) { _ };
+
+/// Failures from registering a function with a program.
+pub const FunctionRegistrationError = Allocator.Error || error{
+    DuplicateFunctionName,
+    FunctionIdExhausted,
+};
+
+const FunctionEntry = struct {
+    id: FunctionId,
+    function: Function,
+};
+
 pub const CallParams = struct {
-    callee: []const u8,
+    callee: FunctionId,
 };
 
 /// Parameters for an opaque runtime-dispatched custom call operation.
@@ -656,14 +673,27 @@ pub const RegionIterator = struct {
 ///  Individual nodes are never freed separately.
 pub const Program = struct {
     arena: std.heap.ArenaAllocator,
-    functions: []Function,
-    reserved_function_names: [][]const u8,
+    function_entries: std.MultiArrayList(FunctionEntry),
+    function_index_by_id: std.AutoHashMapUnmanaged(FunctionId, usize),
+    function_id_by_name: std.StringHashMapUnmanaged(FunctionId),
+    next_function_id: u64,
+    reserved_function_names: std.ArrayList([]const u8),
+
+    /// Append-only program state used to discard later functions and name
+    ///  reservations.
+    pub const AppendCheckpoint = struct {
+        function_count: usize,
+        reservation_count: usize,
+    };
 
     pub fn init(backing_allocator: std.mem.Allocator) Program {
         return .{
             .arena = std.heap.ArenaAllocator.init(backing_allocator),
-            .functions = &.{},
-            .reserved_function_names = &.{},
+            .function_entries = .empty,
+            .function_index_by_id = .empty,
+            .function_id_by_name = .empty,
+            .next_function_id = 0,
+            .reserved_function_names = .empty,
         };
     }
 
@@ -671,34 +701,108 @@ pub const Program = struct {
         return self.arena.allocator();
     }
 
-    /// Append a function whose name is not already present.
+    /// Append a function whose name is not already present and return its
+    ///  program identity.
     pub fn add_function(
         self: *Program,
         func: Function,
-    ) (Allocator.Error || error{DuplicateFunctionName})!void {
-        if (self.get_function(func.name) != null) return error.DuplicateFunctionName;
+    ) FunctionRegistrationError!FunctionId {
+        if (self.function_id_by_name.contains(func.name)) return error.DuplicateFunctionName;
 
-        const a = self.allocator();
-        const new_items = try a.alloc(Function, self.functions.len + 1);
-        @memcpy(new_items[0..self.functions.len], self.functions);
-        new_items[self.functions.len] = func;
-        self.functions = new_items;
+        const raw_id = std.math.cast(u32, self.next_function_id) orelse
+            return error.FunctionIdExhausted;
+        const id: FunctionId = @enumFromInt(raw_id);
+        const index = self.function_entries.len;
+        const arena = self.allocator();
+
+        try self.function_entries.append(arena, .{ .id = id, .function = func });
+        errdefer self.function_entries.shrinkRetainingCapacity(index);
+        try self.function_index_by_id.put(arena, id, index);
+        errdefer std.debug.assert(self.function_index_by_id.remove(id));
+        try self.function_id_by_name.put(arena, func.name, id);
+
+        self.next_function_id += 1;
+        return id;
+    }
+
+    /// Return the program functions in insertion order.
+    ///
+    /// The slice is borrowed. Do not retain it across program mutation.
+    pub fn functions(self: *const Program) []const Function {
+        return self.function_entries.slice().items(.function);
+    }
+
+    /// Return function identities in the same insertion order as `functions`.
+    ///
+    /// The slice is borrowed. Do not retain it across program mutation.
+    pub fn function_ids(self: *const Program) []const FunctionId {
+        return self.function_entries.slice().items(.id);
+    }
+
+    /// Replace a function without changing its identity or name.
+    pub fn replace_function(
+        self: *Program,
+        id: FunctionId,
+        func: Function,
+    ) error{ FunctionIdOutOfRange, FunctionNameMismatch }!void {
+        const index = self.function_index_by_id.get(id) orelse
+            return error.FunctionIdOutOfRange;
+        const functions_column = self.function_entries.slice().items(.function);
+        if (!std.mem.eql(u8, functions_column[index].name, func.name))
+            return error.FunctionNameMismatch;
+        functions_column[index] = func;
+    }
+
+    /// Capture function and name-reservation counts for error cleanup.
+    pub fn checkpoint_appends(self: *const Program) AppendCheckpoint {
+        return .{
+            .function_count = self.function_entries.len,
+            .reservation_count = self.reserved_function_names.items.len,
+        };
+    }
+
+    /// Discard functions and name reservations added after `saved`.
+    ///
+    /// Function replacements and arena allocations are unaffected.
+    pub fn restore_appends(self: *Program, saved: AppendCheckpoint) void {
+        std.debug.assert(saved.function_count <= self.function_entries.len);
+        std.debug.assert(saved.reservation_count <= self.reserved_function_names.items.len);
+        const entries = self.function_entries.slice();
+        const ids = entries.items(.id);
+        const functions_column = entries.items(.function);
+        for (saved.function_count..self.function_entries.len) |index| {
+            std.debug.assert(self.function_index_by_id.remove(ids[index]));
+            std.debug.assert(self.function_id_by_name.remove(functions_column[index].name));
+        }
+        self.function_entries.shrinkRetainingCapacity(saved.function_count);
+        self.reserved_function_names.shrinkRetainingCapacity(saved.reservation_count);
     }
 
     /// Look up a function by name.
     pub fn get_function(self: *const Program, name: []const u8) ?Function {
-        for (self.functions) |f| {
-            if (std.mem.eql(u8, f.name, name)) return f;
-        }
-        return null;
+        const id = self.get_function_id(name) orelse return null;
+        return self.get_function_by_id(id);
     }
 
-    /// Allocate a function name not present in the program.
+    /// Look up a function identity by name.
+    pub fn get_function_id(self: *const Program, name: []const u8) ?FunctionId {
+        return self.function_id_by_name.get(name);
+    }
+
+    /// Look up a function by its stable program identity.
+    pub fn get_function_by_id(self: *const Program, id: FunctionId) ?Function {
+        const index = self.function_index_by_id.get(id) orelse return null;
+        return self.function_entries.slice().items(.function)[index];
+    }
+
+    /// Allocate and reserve a function name not present in the program.
     ///
     /// The returned name is owned by `self` and is reserved against subsequent
-    /// calls. The first request returns `base` when available,
-    /// followed by names with increasing numeric suffixes.
-    pub fn unique_function_name(self: *Program, base: []const u8) Allocator.Error![]const u8 {
+    /// calls, including nested construction before the function is registered.
+    /// The first request returns `base` when available, followed by names with
+    /// increasing numeric suffixes. Reservations remain until error cleanup or
+    /// program deinitialization.
+    pub fn reserve_unique_function_name(self: *Program, base: []const u8) Allocator.Error![]const u8 {
         const a = self.allocator();
         var suffix: usize = 0;
         while (true) : (suffix += 1) {
@@ -708,37 +812,17 @@ pub const Program = struct {
                 try std.fmt.allocPrint(a, "{s}_{d}", .{ base, suffix });
             if (!self.function_name_available(name)) continue;
 
-            const old_len = self.reserved_function_names.len;
-            if (old_len > 0 and a.resize(self.reserved_function_names, old_len + 1)) {
-                self.reserved_function_names.len = old_len + 1;
-            } else {
-                const reservations = try a.alloc([]const u8, old_len + 1);
-                @memcpy(reservations[0..old_len], self.reserved_function_names);
-                self.reserved_function_names = reservations;
-            }
-            self.reserved_function_names[old_len] = name;
+            try self.reserved_function_names.append(a, name);
             return name;
         }
     }
 
     fn function_name_available(self: *const Program, name: []const u8) bool {
-        if (self.get_function(name) != null) return false;
-        for (self.reserved_function_names) |reserved| {
+        if (self.function_id_by_name.contains(name)) return false;
+        for (self.reserved_function_names.items) |reserved| {
             if (std.mem.eql(u8, reserved, name)) return false;
         }
         return true;
-    }
-
-    /// Number of input parameters for a named function.
-    pub fn input_arity(self: *const Program, name: []const u8) usize {
-        const f = self.get_function(name) orelse return 0;
-        return f.params.len;
-    }
-
-    /// Number of output values for a named function.
-    pub fn output_arity(self: *const Program, name: []const u8) usize {
-        const f = self.get_function(name) orelse return 0;
-        return f.returns.len;
     }
 
     pub fn deinit(self: *Program) void {
@@ -786,6 +870,7 @@ pub const ValidationError = error{
     CustomCallTypeMismatch,
     IotaTypeMismatch,
     DuplicateFunctionName,
+    FunctionIdentityMismatch,
     ScatterAddTypeMismatch,
     DuplicateAnnotationName,
 };
@@ -809,17 +894,14 @@ pub fn validate_ops_in_func(func: Function) ValidationError!void {
 }
 
 pub fn validate_program(program: *const Program) ValidationError!void {
-    var i: usize = 0;
-    while (i < program.functions.len) : (i += 1) {
-        var j: usize = i + 1;
-        while (j < program.functions.len) : (j += 1) {
-            if (std.mem.eql(u8, program.functions[i].name, program.functions[j].name)) {
-                return error.DuplicateFunctionName;
-            }
-        }
-    }
-
-    for (program.functions) |func| {
+    if (program.function_index_by_id.count() != program.functions().len or
+        program.function_id_by_name.count() != program.functions().len)
+        return error.FunctionIdentityMismatch;
+    for (program.functions(), program.function_ids(), 0..) |func, id, i| {
+        if (program.get_function_id(func.name) != id or
+            program.function_index_by_id.get(id) != i or
+            program.next_function_id <= @intFromEnum(id))
+            return error.FunctionIdentityMismatch;
         try validate_ops_in_func(func);
         try validate_annotations(func.annotations);
         for (func.regions) |region| {
@@ -830,23 +912,14 @@ pub fn validate_program(program: *const Program) ValidationError!void {
             if (op.prim() != .call) continue;
 
             const call_params = op.params.call;
-            const callee_name = call_params.callee;
-
-            var callee: ?Function = null;
-            for (program.functions) |candidate| {
-                if (std.mem.eql(u8, candidate.name, callee_name)) {
-                    callee = candidate;
-                    break;
-                }
-            }
-            const callee_func = callee orelse {
-                pr_log.err("call references unknown function '{s}' in '{s}'", .{ callee_name, func.name });
+            const callee_func = program.get_function_by_id(call_params.callee) orelse {
+                pr_log.err("call references unknown function id {d} in '{s}'", .{ @intFromEnum(call_params.callee), func.name });
                 return error.CallUnresolvedCallee;
             };
 
             if (op.inputs.len != callee_func.params.len or op.outputs.len != callee_func.returns.len) {
                 pr_log.err("call arity mismatch: '{s}' expects {d} inputs/{d} outputs, got {d}/{d}", .{
-                    callee_name,
+                    callee_func.name,
                     callee_func.params.len,
                     callee_func.returns.len,
                     op.inputs.len,
@@ -1317,21 +1390,17 @@ pub const FunctionBuilder = struct {
         return try self.emit_outputs(.{ .custom_call = stored_params }, inputs, out_avals);
     }
 
-    pub fn call(self: *FunctionBuilder, callee: []const u8, inputs: []const *Var) BuildError![]*Var {
-        var callee_func: ?Function = null;
-        for (self.program.functions) |func| {
-            if (std.mem.eql(u8, func.name, callee)) {
-                callee_func = func;
-                break;
-            }
-        }
-        const callee_fn = callee_func orelse {
-            pr_log.err("call references unknown function '{s}'", .{callee});
+    /// Emit a call to a function registered in the builder's program.
+    ///
+    /// Input arity and tensor signatures must match the registered function.
+    pub fn call(self: *FunctionBuilder, callee_id: FunctionId, inputs: []const *Var) BuildError![]*Var {
+        const callee_fn = self.program.get_function_by_id(callee_id) orelse {
+            pr_log.err("call references unknown function id {d}", .{@intFromEnum(callee_id)});
             return error.CallUnresolvedCallee;
         };
 
         if (inputs.len != callee_fn.params.len) {
-            pr_log.err("call arity mismatch: '{s}' expects {d} inputs, got {d}", .{ callee, callee_fn.params.len, inputs.len });
+            pr_log.err("call arity mismatch: '{s}' expects {d} inputs, got {d}", .{ callee_fn.name, callee_fn.params.len, inputs.len });
             return error.CallArityMismatch;
         }
         for (inputs, 0..) |in_var, i| {
@@ -1346,8 +1415,7 @@ pub const FunctionBuilder = struct {
             out_avals[i] = ret_var.aval;
         }
 
-        const callee_copy = try a.dupe(u8, callee);
-        return try self.emit_outputs(.{ .call = .{ .callee = callee_copy } }, inputs, out_avals);
+        return try self.emit_outputs(.{ .call = .{ .callee = callee_id } }, inputs, out_avals);
     }
 
     /// Finalize and validate the function.
@@ -1400,24 +1468,55 @@ test "Program.add_function rejects duplicate names" {
         .var_count = 0,
     };
 
-    try program.add_function(function);
+    _ = try program.add_function(function);
     try std.testing.expectError(error.DuplicateFunctionName, program.add_function(function));
 }
 
-test "Program.unique_function_name increments occupied names" {
+test "Program.reserve_unique_function_name increments occupied names" {
     var program = Program.init(std.testing.allocator);
     defer program.deinit();
 
     var first = try FunctionBuilder.init(&program, "generated");
     defer first.deinit();
-    try program.add_function(try first.finish(&.{}));
+    _ = try program.add_function(try first.finish(&.{}));
 
     var second = try FunctionBuilder.init(&program, "generated_1");
     defer second.deinit();
-    try program.add_function(try second.finish(&.{}));
+    _ = try program.add_function(try second.finish(&.{}));
 
-    try std.testing.expectEqualStrings("available", try program.unique_function_name("available"));
-    try std.testing.expectEqualStrings("generated_2", try program.unique_function_name("generated"));
+    try std.testing.expectEqualStrings("available", try program.reserve_unique_function_name("available"));
+    try std.testing.expectEqualStrings("available_1", try program.reserve_unique_function_name("available"));
+    try std.testing.expectEqualStrings("generated_2", try program.reserve_unique_function_name("generated"));
+}
+
+test "Program.restore discards appended functions and reservations" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var first = try FunctionBuilder.init(&program, "first");
+    defer first.deinit();
+    const first_id = try program.add_function(try first.finish(&.{}));
+    try std.testing.expectEqual(@as(FunctionId, @enumFromInt(0)), first_id);
+
+    const saved = program.checkpoint_appends();
+    _ = try program.reserve_unique_function_name("reserved");
+    var second = try FunctionBuilder.init(&program, "second");
+    defer second.deinit();
+    const second_id = try program.add_function(try second.finish(&.{}));
+    try std.testing.expectEqual(@as(FunctionId, @enumFromInt(1)), second_id);
+
+    program.restore_appends(saved);
+    try std.testing.expectEqual(@as(usize, 1), program.functions().len);
+    try std.testing.expectEqual(@as(usize, 0), program.checkpoint_appends().reservation_count);
+    try std.testing.expect(program.get_function("first") != null);
+    try std.testing.expect(program.get_function("second") == null);
+    try std.testing.expect(program.get_function_by_id(@enumFromInt(1)) == null);
+
+    var third = try FunctionBuilder.init(&program, "third");
+    defer third.deinit();
+    const third_id = try program.add_function(try third.finish(&.{}));
+    try std.testing.expectEqual(@as(FunctionId, @enumFromInt(2)), third_id);
+    try std.testing.expect(program.get_function_by_id(second_id) == null);
 }
 
 test "FunctionBuilder reshape validation" {
@@ -1506,7 +1605,7 @@ test "FunctionBuilder releases allocations after every allocation failure" {
             try builder.push_region("sum", &.{});
             const output = try builder.add(lhs, rhs);
             const function = try builder.finish(&.{output});
-            try program.add_function(function);
+            _ = try program.add_function(function);
         }
     }.build, .{});
 }

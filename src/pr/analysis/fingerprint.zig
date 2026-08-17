@@ -232,12 +232,12 @@ test "function rejects unresolved calls" {
     defer callee_builder.deinit();
     const callee_input = try callee_builder.param_tensor(.f32, &.{2});
     const callee = try callee_builder.finish(&.{callee_input});
-    try program.add_function(callee);
+    const callee_id = try program.add_function(callee);
 
     var builder = try pr.FunctionBuilder.init(&program, "caller");
     defer builder.deinit();
     const input = try builder.param_tensor(.f32, &.{2});
-    const result = try builder.call("callee", &.{input});
+    const result = try builder.call(callee_id, &.{input});
     const func = try builder.finish(result);
 
     try std.testing.expectError(error.UnsupportedCall, function(std.testing.allocator, func));

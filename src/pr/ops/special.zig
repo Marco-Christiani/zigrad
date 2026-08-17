@@ -41,7 +41,7 @@ pub const call = struct {
     }
 
     pub fn format(writer: *types.Writer, _: *const pr.Op, cp: pr.CallParams) types.FormatError!void {
-        try writer.print("callee=\"{s}\"", .{cp.callee});
+        try writer.print("callee=@{d}", .{@intFromEnum(cp.callee)});
     }
 
     pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, cp: pr.CallParams) types.AdError!void {

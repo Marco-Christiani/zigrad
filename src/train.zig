@@ -27,7 +27,7 @@ const TensorTree = @import("utils.zig").Tree(Tensor);
 ///     allocator,
 ///     loaded_program,
 ///     initial_tensors,
-///     program.output_arity("train_step"),
+///     program.get_function("train_step").?.returns.len,
 ///     .{ .non_donatable_input_indices = comptime donate_argnums(@TypeOf(specs), &.{0}) },
 /// );
 /// defer state.deinit(.all);
@@ -149,6 +149,7 @@ pub const TrainState = struct {
             .{ .donated_input_indices = self.donated_input_indices },
         );
 
+        // TODO: APIs have generalized so the packing assumptions made here may no longer hold.
         const loss_buf = self.output_buffers[0];
 
         // Swap donatable buffers: output[1+i] replaces input[i] for each

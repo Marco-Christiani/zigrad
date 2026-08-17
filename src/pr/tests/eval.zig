@@ -157,7 +157,7 @@ fn eval_call(
     params: pr.CallParams,
     env: []?HostTensor,
 ) EvalError!void {
-    const callee = program.get_function(params.callee) orelse return error.UnknownFunction;
+    const callee = program.get_function_by_id(params.callee) orelse return error.UnknownFunction;
     const inputs = try allocator.alloc(HostTensor, op.inputs.len);
     defer allocator.free(inputs);
     for (op.inputs, inputs) |operand, *input| {
@@ -1074,7 +1074,7 @@ const testing = std.testing;
 
 fn build_and_finish(program: *pr.Program, b: *pr.FunctionBuilder, returns: []const *pr.Var) !pr.Function {
     const func = try b.finish(returns);
-    try program.add_function(func);
+    _ = try program.add_function(func);
     return func;
 }
 

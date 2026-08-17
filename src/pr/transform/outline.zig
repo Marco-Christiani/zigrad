@@ -40,15 +40,15 @@ pub const ApplyOptions = struct {
 
 /// Location of the function and call produced by outlining.
 pub const ApplyResult = struct {
-    /// Index of the appended outlined function.
-    function_index: usize,
+    /// Identity of the appended outlined function.
+    function_id: pr.FunctionId,
     /// Operation id of the replacement call in the caller.
     call_op_id: u32,
 };
 
 /// Structural and allocation failures produced by region outlining.
-pub const ApplyError = pr.BuildError || error{
-    FunctionIndexOutOfRange,
+pub const ApplyError = pr.BuildError || pr.FunctionRegistrationError || error{
+    FunctionIdOutOfRange,
     RegionNotFound,
     EmptyRegion,
     UnknownRegionOperation,
@@ -69,20 +69,22 @@ const OpRange = struct {
 pub fn apply(
     program: *pr.Program,
     scratch: Allocator,
-    function_index: usize,
+    function_id: pr.FunctionId,
     region_id: u32,
     opts: ApplyOptions,
 ) ApplyError!ApplyResult {
-    if (function_index >= program.functions.len) return error.FunctionIndexOutOfRange;
-
-    const source = program.functions[function_index];
+    const source = program.get_function_by_id(function_id) orelse return error.FunctionIdOutOfRange;
     const target = find_region(source, region_id) orelse return error.RegionNotFound;
-    const generated_name = if (opts.function_name == null)
-        try unique_function_name(scratch, program, function_index, target)
+    const saved = program.checkpoint_appends();
+    errdefer program.restore_appends(saved);
+
+    const generated_base = if (opts.function_name == null)
+        try std.fmt.allocPrint(scratch, "{s}_outlined_{d}", .{ source.name, target.id })
     else
         null;
-    defer if (generated_name) |name| scratch.free(name);
-    const function_name = opts.function_name orelse generated_name.?;
+    defer if (generated_base) |name| scratch.free(name);
+    const function_name = opts.function_name orelse
+        try program.reserve_unique_function_name(generated_base.?);
     if (program.get_function(function_name) != null) return error.DuplicateFunctionName;
     const target_range = try region_range(source, target);
 
@@ -123,13 +125,15 @@ pub fn apply(
     defer scratch.free(caller_op_ids);
     @memset(caller_op_ids, null);
 
+    const outlined_id = try program.add_function(outlined);
+
     var caller = try build_caller_function(
         program,
         scratch,
         source,
         desc,
         target_range,
-        function_name,
+        outlined_id,
         caller_op_ids,
     );
     const call_op_id = caller_op_ids[target_range.start].?;
@@ -143,18 +147,11 @@ pub fn apply(
         caller_op_ids,
     );
 
-    const functions = try program.allocator().alloc(pr.Function, program.functions.len + 1);
-    @memcpy(functions[0..program.functions.len], program.functions);
-    functions[function_index] = caller;
-    functions[program.functions.len] = outlined;
-    const previous_functions = program.functions;
-    program.functions = functions;
-    pr.validate_program(program) catch |err| {
-        program.functions = previous_functions;
-        return err;
-    };
+    program.replace_function(function_id, caller) catch unreachable;
+    errdefer program.replace_function(function_id, source) catch unreachable;
+    try pr.validate_program(program);
     return .{
-        .function_index = functions.len - 1,
+        .function_id = outlined_id,
         .call_op_id = call_op_id,
     };
 }
@@ -173,21 +170,12 @@ pub const Pass = struct {
             );
             defer ctx.allocator.free(remaining);
 
-            const function_name = try unique_function_name(
-                ctx.allocator,
-                program,
-                request.function_index,
-                request.region,
-            );
-            defer ctx.allocator.free(function_name);
-
             _ = try apply(
                 program,
                 ctx.allocator,
-                request.function_index,
+                request.function_id,
                 request.region.id,
                 .{
-                    .function_name = function_name,
                     .function_annotations = remaining,
                 },
             );
@@ -197,17 +185,17 @@ pub const Pass = struct {
 };
 
 const Request = struct {
-    function_index: usize,
+    function_id: pr.FunctionId,
     region: pr.Region,
 };
 
 fn find_innermost_request(program: *const pr.Program) AnnotationError!?Request {
     var found: ?Request = null;
-    for (program.functions, 0..) |func, function_index| {
+    for (program.functions(), program.function_ids()) |func, function_id| {
         for (func.regions) |region| {
             if (!try is_requested(region)) continue;
             if (found == null or region.op_ids.len < found.?.region.op_ids.len) {
-                found = .{ .function_index = function_index, .region = region };
+                found = .{ .function_id = function_id, .region = region };
             }
         }
     }
@@ -225,24 +213,6 @@ fn annotations_without(
         if (!std.mem.eql(u8, item.name, name)) try result.append(allocator, item);
     }
     return try result.toOwnedSlice(allocator);
-}
-
-fn unique_function_name(
-    allocator: Allocator,
-    program: *const pr.Program,
-    function_index: usize,
-    region: pr.Region,
-) Allocator.Error![]u8 {
-    const parent_name = program.functions[function_index].name;
-    var suffix: usize = 0;
-    while (true) : (suffix += 1) {
-        const name = if (suffix == 0)
-            try std.fmt.allocPrint(allocator, "{s}_outlined_{d}", .{ parent_name, region.id })
-        else
-            try std.fmt.allocPrint(allocator, "{s}_outlined_{d}_{d}", .{ parent_name, region.id, suffix });
-        if (program.get_function(name) == null) return name;
-        allocator.free(name);
-    }
 }
 
 fn find_region(func: pr.Function, region_id: u32) ?pr.Region {
@@ -312,7 +282,7 @@ fn build_caller_function(
     source: pr.Function,
     desc: region_view.RegionView,
     target_range: OpRange,
-    function_name: []const u8,
+    callee_id: pr.FunctionId,
     op_ids: []?u32,
 ) ApplyError!pr.Function {
     var builder = try pr.FunctionBuilder.init(program, source.name);
@@ -335,9 +305,8 @@ fn build_caller_function(
             defer scratch.free(inputs);
             const out_avals = try avals(scratch, desc.outputs);
             defer scratch.free(out_avals);
-            const callee_name = try program.allocator().dupe(u8, function_name);
             const outputs = try builder.emit_outputs(
-                .{ .call = .{ .callee = callee_name } },
+                .{ .call = .{ .callee = callee_id } },
                 inputs,
                 out_avals,
             );
@@ -498,7 +467,7 @@ test "apply outlines a nested region and preserves surrounding regions" {
     try builder.pop_region();
 
     const main = try builder.finish(&.{result});
-    try program.add_function(main);
+    const main_id = try program.add_function(main);
 
     const target = for (main.regions) |region| {
         if (std.mem.eql(u8, region.name, "target")) break region;
@@ -506,7 +475,7 @@ test "apply outlines a nested region and preserves surrounding regions" {
     const outlined = try apply(
         &program,
         testing.allocator,
-        0,
+        main_id,
         target.id,
         .{
             .function_name = "main_target",
@@ -514,21 +483,21 @@ test "apply outlines a nested region and preserves surrounding regions" {
         },
     );
 
-    try testing.expectEqual(@as(usize, 1), outlined.function_index);
+    try testing.expectEqual(@as(pr.FunctionId, @enumFromInt(1)), outlined.function_id);
     try testing.expectEqual(@as(u32, 1), outlined.call_op_id);
-    try testing.expectEqual(@as(usize, 2), program.functions.len);
+    try testing.expectEqual(@as(usize, 2), program.functions().len);
 
-    const caller = program.functions[0];
+    const caller = program.functions()[0];
     try testing.expectEqual(@as(usize, 3), caller.ops.len);
     try testing.expectEqual(pr.Prim.call, caller.ops[1].prim());
-    try testing.expectEqualStrings("main_target", caller.ops[1].params.call.callee);
+    try testing.expectEqual(@as(pr.FunctionId, @enumFromInt(1)), caller.ops[1].params.call.callee);
     try testing.expectEqual(@as(usize, 2), caller.ops[1].inputs.len);
     try testing.expectEqual(@as(usize, 1), caller.ops[1].outputs.len);
     try testing.expectEqual(@as(usize, 1), caller.regions.len);
     try testing.expectEqualStrings("outer", caller.regions[0].name);
     try testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, caller.regions[0].op_ids);
 
-    const callee = program.functions[1];
+    const callee = program.functions()[1];
     try testing.expectEqualStrings("main_target", callee.name);
     try testing.expectEqualSlices(
         u8,
@@ -562,14 +531,14 @@ test "Pass consumes outline and transfers independent annotations" {
     });
     const result = try builder.mm(lhs, rhs);
     try builder.pop_region();
-    try program.add_function(try builder.finish(&.{result}));
+    _ = try program.add_function(try builder.finish(&.{result}));
 
     var ctx = compilation.Context{ .allocator = testing.allocator, .io = testing.io };
     _ = try (Pass{}).run(&program, &ctx);
 
-    try testing.expectEqual(@as(usize, 2), program.functions.len);
-    try testing.expectEqual(@as(usize, 0), program.functions[0].regions.len);
-    const callee = program.functions[1];
+    try testing.expectEqual(@as(usize, 2), program.functions().len);
+    try testing.expectEqual(@as(usize, 0), program.functions()[0].regions.len);
+    const callee = program.functions()[1];
     try testing.expect(callee.find_annotation(annotation_name) == null);
     try testing.expectEqualSlices(
         u8,
@@ -599,12 +568,12 @@ test "apply preserves multiple region outputs" {
     try builder.pop_region();
 
     const main = try builder.finish(&.{ exponential, logarithm });
-    try program.add_function(main);
-    _ = try apply(&program, testing.allocator, 0, main.regions[0].id, .{
+    const main_id = try program.add_function(main);
+    _ = try apply(&program, testing.allocator, main_id, main.regions[0].id, .{
         .function_name = "main_pair",
     });
 
-    try testing.expectEqual(@as(usize, 1), program.functions[0].ops.len);
-    try testing.expectEqual(@as(usize, 2), program.functions[0].ops[0].outputs.len);
-    try testing.expectEqual(@as(usize, 2), program.functions[1].returns.len);
+    try testing.expectEqual(@as(usize, 1), program.functions()[0].ops.len);
+    try testing.expectEqual(@as(usize, 2), program.functions()[0].ops[0].outputs.len);
+    try testing.expectEqual(@as(usize, 2), program.functions()[1].returns.len);
 }

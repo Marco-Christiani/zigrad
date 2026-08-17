@@ -134,12 +134,8 @@ pub fn value_and_grad(
     const builder = extract_builder(args) orelse @panic("no Tensor found in args");
     const program = builder.program;
     const alloc = program.allocator();
-    const initial_function_count = program.functions.len;
-    const initial_reservation_count = program.reserved_function_names.len;
-    errdefer {
-        program.functions = program.functions[0..initial_function_count];
-        program.reserved_function_names = program.reserved_function_names[0..initial_reservation_count];
-    }
+    const saved = program.checkpoint_appends();
+    errdefer program.restore_appends(saved);
 
     // Flatten arguments into a tree.
     //
@@ -156,7 +152,7 @@ pub fn value_and_grad(
 
     // Build a sub-function: create traced params matching the
     // spec shapes, reconstruct the structured args, and call func.
-    const source_name = try program.unique_function_name("vg_source");
+    const source_name = try program.reserve_unique_function_name("vg_source");
     var source_builder = try pr.FunctionBuilder.init(program, source_name);
     defer source_builder.deinit();
 
@@ -191,7 +187,7 @@ pub fn value_and_grad(
     //  reference alongside the larger VJP function).
     // TODO(ad): Call the registered source function from VJP instead of replaying
     //  its operations.
-    try program.add_function(source_func);
+    _ = try program.add_function(source_func);
 
     // Request gradients only for the selected argument's leaves.
     //  `wrt` filters the VJP function's output list: cotangents for
@@ -200,12 +196,12 @@ pub fn value_and_grad(
     //  gradients. Any intermediate cotangents that only fed omitted outputs
     //  become dead and are cleaned up by the backend's DCE.
     const wrt_indices = comptime selected_leaf_indices(ArgsType, opts.wrt_argnums);
-    const vjp_name = try program.unique_function_name("vg_vjp");
+    const vjp_name = try program.reserve_unique_function_name("vg_vjp");
     const vjp_func = try ad.vjp_with_value(alloc, program, source_func, vjp_name, .{
         .of = &.{selected_output},
         .wrt = &wrt_indices,
     });
-    try program.add_function(vjp_func);
+    const vjp_id = try program.add_function(vjp_func);
 
     // Emit a ones-like cotangent for the selected scalar output in the outer builder.
     const cot = try ad.emit_cotangent(builder, selected_var.as_tensor());
@@ -218,7 +214,7 @@ pub fn value_and_grad(
     @memcpy(call_args[0..total_leaf_count], input_vars[0..total_leaf_count]);
     call_args[total_leaf_count] = cot;
 
-    const call_outputs = try builder.call(vjp_name, call_args);
+    const call_outputs = try builder.call(vjp_id, call_args);
     if (call_outputs.len != output_leaf_count + grad_leaf_count) return error.UnexpectedOutputs;
 
     const output_leaves = try alloc.alloc(Tensor, output_leaf_count);
@@ -505,11 +501,11 @@ test "value_and_grad restores registered functions after failure" {
     const input = try Tensor.param(&builder, .f32, &.{});
 
     try std.testing.expectError(error.UnsupportedEqn, value_and_grad(unsupported_loss, .{input}, .{}));
-    try std.testing.expectEqual(@as(usize, 0), program.functions.len);
-    try std.testing.expectEqual(@as(usize, 0), program.reserved_function_names.len);
+    try std.testing.expectEqual(@as(usize, 0), program.functions().len);
+    try std.testing.expectEqual(@as(usize, 0), program.checkpoint_appends().reservation_count);
     try std.testing.expectError(error.UnsupportedEqn, value_and_grad(unsupported_loss, .{input}, .{}));
-    try std.testing.expectEqual(@as(usize, 0), program.functions.len);
-    try std.testing.expectEqual(@as(usize, 0), program.reserved_function_names.len);
+    try std.testing.expectEqual(@as(usize, 0), program.functions().len);
+    try std.testing.expectEqual(@as(usize, 0), program.checkpoint_appends().reservation_count);
 }
 
 test make_grad {
@@ -535,8 +531,9 @@ test make_grad {
     defer program.deinit();
 
     // grad returns only grads for first arg (2 leaves: w, b).
-    try std.testing.expectEqual(2, program.output_arity("grad_test"));
-    try std.testing.expectEqual(3, program.input_arity("grad_test"));
+    const grad_test = program.get_function("grad_test").?;
+    try std.testing.expectEqual(2, grad_test.returns.len);
+    try std.testing.expectEqual(3, grad_test.params.len);
 }
 
 test "make_grad selects differentiated arguments in order" {
@@ -576,8 +573,9 @@ test "make_grad has no positional arity ceiling" {
     var program = try trace(grad_fn, std.testing.allocator, specs, "five_arg_grad_test");
     defer program.deinit();
 
-    try std.testing.expectEqual(@as(usize, 1), program.output_arity("five_arg_grad_test"));
-    try std.testing.expectEqual(@as(usize, 5), program.input_arity("five_arg_grad_test"));
+    const five_arg_grad_test = program.get_function("five_arg_grad_test").?;
+    try std.testing.expectEqual(@as(usize, 1), five_arg_grad_test.returns.len);
+    try std.testing.expectEqual(@as(usize, 5), five_arg_grad_test.params.len);
 }
 
 test make_value_and_grad {
@@ -602,8 +600,9 @@ test make_value_and_grad {
     defer program.deinit();
 
     // value_and_grad returns value (1 tensor) + grads for first arg (2 leaves).
-    try std.testing.expectEqual(3, program.output_arity("vg_test"));
-    try std.testing.expectEqual(3, program.input_arity("vg_test"));
+    const vg_test = program.get_function("vg_test").?;
+    try std.testing.expectEqual(3, vg_test.returns.len);
+    try std.testing.expectEqual(3, vg_test.params.len);
 }
 
 test "make_value_and_grad preserves structured outputs and selects by path" {
@@ -627,6 +626,7 @@ test "make_value_and_grad preserves structured outputs and selects by path" {
     var program = try trace(vg_fn, std.testing.allocator, specs, "structured_vg_test");
     defer program.deinit();
 
-    try std.testing.expectEqual(@as(usize, 4), program.output_arity("structured_vg_test"));
-    try std.testing.expectEqual(@as(usize, 3), program.input_arity("structured_vg_test"));
+    const structured_vg_test = program.get_function("structured_vg_test").?;
+    try std.testing.expectEqual(@as(usize, 4), structured_vg_test.returns.len);
+    try std.testing.expectEqual(@as(usize, 3), structured_vg_test.params.len);
 }

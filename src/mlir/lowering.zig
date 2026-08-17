@@ -22,11 +22,18 @@ const log = std.log.scoped(.@"zg/mlir_lower");
 /// Maximum tensor rank representable by PR.
 pub const max_rank = pr.max_rank;
 
+/// Failures from selecting a program entry function.
+pub const EntryError = error{
+    NoFunctions,
+    EntryNotFound,
+    EntrySelectionRequired,
+};
+
 /// Failures exposed by PR to MLIR lowering.
 ///
 /// `InvalidProgram` reports a missing value mapping or another structural
 ///  invariant that lowering requires. Callers validate PR before lowering.
-pub const LowerError = mlir.Error || std.Io.Writer.Error || error{InvalidProgram};
+pub const LowerError = mlir.Error || std.Io.Writer.Error || EntryError || error{InvalidProgram};
 
 /// Callback type for dialect-specific op translation.
 ///
@@ -53,6 +60,8 @@ pub const LowerContext = struct {
     value_map: []?mlir.Value,
     /// Scratch allocator for transient lowering buffers (e.g., dim arrays).
     arena: std.mem.Allocator,
+    /// MLIR symbols keyed by PR function identity.
+    function_symbols: *const std.AutoHashMapUnmanaged(pr.FunctionId, []const u8),
 
     pub fn get_value(self: LowerContext, v: *const pr.Var) ?mlir.Value {
         return self.value_map[v.id];
@@ -100,11 +109,24 @@ pub fn lower_program_to_mlir(
     var module = mlir.Module.init(loc);
     defer module.deinit();
 
-    const entry_index = try find_entry_function(program, entry_name);
+    const entry_id = try resolve_entry_function(program, entry_name);
+    var function_symbols: std.AutoHashMapUnmanaged(pr.FunctionId, []const u8) = .empty;
+    try function_symbols.ensureTotalCapacity(arena, @intCast(program.functions().len));
+    for (program.function_ids()) |function_id| {
+        const symbol = try choose_symbol_name(arena, program, function_id, entry_id, entry_name);
+        function_symbols.putAssumeCapacityNoClobber(function_id, symbol);
+    }
 
-    for (program.functions, 0..) |func, idx| {
-        const sym_name = try choose_symbol_name(arena, program, idx, entry_index, entry_name);
-        try lower_function_into_module(arena, ctx, module, func, sym_name, lower_op_fn);
+    for (program.functions(), program.function_ids()) |func, function_id| {
+        try lower_function_into_module(
+            arena,
+            ctx,
+            module,
+            func,
+            function_symbols.get(function_id).?,
+            &function_symbols,
+            lower_op_fn,
+        );
     }
 
     if (!module.op().verify()) return error.InvalidMlir;
@@ -119,6 +141,7 @@ fn lower_function_into_module(
     module: mlir.Module,
     func: pr.Function,
     sym_name: []const u8,
+    function_symbols: *const std.AutoHashMapUnmanaged(pr.FunctionId, []const u8),
     lower_op_fn: LowerOpFn,
 ) LowerError!void {
     const loc = mlir.Location.unknown(ctx);
@@ -153,6 +176,7 @@ fn lower_function_into_module(
         .loc = loc,
         .value_map = value_map,
         .arena = arena,
+        .function_symbols = function_symbols,
     };
 
     for (func.ops) |op| try lower_op_fn(lower_ctx, op);
@@ -184,7 +208,8 @@ fn lower_function_into_module(
 
 /// Lower a `func.call` op. Uses the `func` dialect only.
 pub fn lower_call(ctx: LowerContext, op: *const pr.Op) LowerError!void {
-    const callee = op.params.call.callee;
+    const callee = ctx.function_symbols.get(op.params.call.callee) orelse
+        return error.InvalidProgram;
 
     const operand_values = try ctx.arena.alloc(mlir.Value, op.inputs.len);
     for (op.inputs, 0..) |operand, i| {
@@ -254,51 +279,83 @@ fn serialize_module(allocator: std.mem.Allocator, module: mlir.Module, out: Outp
     return try writer_state.toOwnedSlice();
 }
 
-/// Resolve the PR function selected as the executable entry point.
-pub fn find_entry_function(program: *const pr.Program, entry_name: ?[]const u8) LowerError!usize {
-    if (program.functions.len == 0) return error.InvalidProgram;
+/// Resolve an explicit entry name, a function named `main`, or the sole
+///  function in a program, in that order.
+///
+/// An empty program returns `NoFunctions`. A requested name that is absent
+///  returns `EntryNotFound`. A program with multiple functions requires an
+///  explicit name or a function named `main`, and returns
+///  `EntrySelectionRequired` when neither is available.
+pub fn resolve_entry_function(program: *const pr.Program, entry_name: ?[]const u8) EntryError!pr.FunctionId {
+    const functions = program.functions();
+    if (functions.len == 0) return error.NoFunctions;
 
     if (entry_name) |name| {
-        for (program.functions, 0..) |func, idx| {
-            if (std.mem.eql(u8, func.name, name)) return idx;
-        }
-        return error.InvalidProgram;
+        return program.get_function_id(name) orelse error.EntryNotFound;
     }
 
-    for (program.functions, 0..) |func, idx| {
-        if (std.mem.eql(u8, func.name, "main")) return idx;
-    }
+    if (program.get_function_id("main")) |main_id| return main_id;
 
-    if (program.functions.len == 1) return 0;
-    return error.InvalidProgram;
+    if (functions.len != 1) return error.EntrySelectionRequired;
+    return program.get_function_id(functions[0].name) orelse unreachable;
 }
 
 /// Choose an MLIR symbol without colliding with the emitted `@main` entry.
-pub fn choose_symbol_name(
+fn choose_symbol_name(
     arena: std.mem.Allocator,
     program: *const pr.Program,
-    idx: usize,
-    entry_index: usize,
+    function_id: pr.FunctionId,
+    entry_id: pr.FunctionId,
     entry_name: ?[]const u8,
 ) error{OutOfMemory}![]const u8 {
-    if (idx == entry_index) return "main";
+    if (function_id == entry_id) return "main";
 
-    const func = program.functions[idx];
+    const func = program.get_function_by_id(function_id).?;
     if (entry_name == null or !std.mem.eql(u8, func.name, "main")) return func.name;
 
     var suffix: usize = 0;
     while (true) : (suffix += 1) {
         const candidate = try std.fmt.allocPrint(arena, "main_non_entry_{d}", .{suffix});
-        if (!is_symbol_name_used(program, entry_index, candidate)) {
+        if (!is_symbol_name_used(program, entry_id, candidate)) {
             if (!@import("builtin").is_test) log.warn("renaming non-entry function 'main' to '{s}' to avoid entry collision", .{candidate});
             return candidate;
         }
     }
 }
 
-fn is_symbol_name_used(program: *const pr.Program, entry_index: usize, name: []const u8) bool {
-    for (program.functions, 0..) |func, idx| {
-        if (idx == entry_index) continue;
+fn add_identity_function_for_entry_test(program: *pr.Program, name: []const u8) !void {
+    var builder = try pr.FunctionBuilder.init(program, name);
+    defer builder.deinit();
+    const x = try builder.param_tensor(.f32, &.{1});
+    _ = try program.add_function(try builder.finish(&.{x}));
+}
+
+test resolve_entry_function {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+
+    try testing.expectError(error.NoFunctions, resolve_entry_function(&program, null));
+
+    try add_identity_function_for_entry_test(&program, "forward");
+    try testing.expectEqual(program.get_function_id("forward").?, try resolve_entry_function(&program, null));
+    try testing.expectError(error.EntryNotFound, resolve_entry_function(&program, "missing"));
+
+    try add_identity_function_for_entry_test(&program, "backward");
+    try testing.expectError(error.EntrySelectionRequired, resolve_entry_function(&program, null));
+    try testing.expectEqual(program.get_function_id("backward").?, try resolve_entry_function(&program, "backward"));
+
+    var main_program = pr.Program.init(testing.allocator);
+    defer main_program.deinit();
+    try add_identity_function_for_entry_test(&main_program, "helper");
+    try add_identity_function_for_entry_test(&main_program, "main");
+    try testing.expectEqual(main_program.get_function_id("main").?, try resolve_entry_function(&main_program, null));
+}
+
+fn is_symbol_name_used(program: *const pr.Program, entry_id: pr.FunctionId, name: []const u8) bool {
+    for (program.functions(), program.function_ids()) |func, function_id| {
+        if (function_id == entry_id) continue;
         if (std.mem.eql(u8, func.name, name)) return true;
     }
     return false;

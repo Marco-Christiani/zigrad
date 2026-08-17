@@ -75,7 +75,7 @@ pub fn trace(
     for (output_tensors, 0..) |t, i| output_vars[i] = try t.get_var();
 
     const func_pr = try builder.finish(output_vars);
-    try program.add_function(func_pr);
+    _ = try program.add_function(func_pr);
 
     return program;
 }

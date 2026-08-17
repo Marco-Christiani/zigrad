@@ -10,7 +10,7 @@ const ops = @import("ops/ops.zig");
 
 const log = std.log.scoped(.@"zg/ad");
 
-pub const AdError = ops.types.AdError;
+pub const AdError = ops.types.AdError || pr.FunctionRegistrationError;
 
 /// Options for `vjp` and `vjp_with_value`.
 pub const VjpOpts = struct {
@@ -39,6 +39,88 @@ const Mode = enum {
 /// Controls whether a derivative function also returns primal outputs.
 const PrimalOutputs = enum { skip, emit };
 
+const GeneratedDerivative = struct {
+    callee: pr.FunctionId,
+    selected_outputs: ?[]const usize,
+    function_id: pr.FunctionId,
+};
+
+const AdTraversal = struct {
+    allocator: std.mem.Allocator,
+    program: *pr.Program,
+    derivatives: std.ArrayList(GeneratedDerivative) = .empty,
+
+    fn deinit(self: *AdTraversal) void {
+        for (self.derivatives.items) |derivative| {
+            if (derivative.selected_outputs) |indices| self.allocator.free(indices);
+        }
+        self.derivatives.deinit(self.allocator);
+    }
+
+    fn get_or_create_derivative(
+        self: *AdTraversal,
+        comptime mode: Mode,
+        callee_id: pr.FunctionId,
+        selected_outputs: ?[]const usize,
+    ) AdError!pr.FunctionId {
+        for (self.derivatives.items) |existing| {
+            if (existing.callee != callee_id) continue;
+            if (!optional_indices_equal(existing.selected_outputs, selected_outputs)) continue;
+            return existing.function_id;
+        }
+
+        const callee = self.program.get_function_by_id(callee_id) orelse
+            return error.CallUnresolvedCallee;
+        const suffix = if (mode == .vjp) "vjp" else "jvp";
+        const base_name = try std.fmt.allocPrint(self.allocator, "{s}_{s}", .{ callee.name, suffix });
+        defer self.allocator.free(base_name);
+        const derivative_name = try self.program.reserve_unique_function_name(base_name);
+        const generated = try ad_impl(
+            mode,
+            self,
+            callee,
+            derivative_name,
+            .skip,
+            null,
+            selected_outputs,
+        );
+        const derivative_id = try self.program.add_function(generated);
+
+        const owned_outputs = if (selected_outputs) |indices|
+            try self.allocator.dupe(usize, indices)
+        else
+            null;
+        errdefer if (owned_outputs) |indices| self.allocator.free(indices);
+        try self.derivatives.append(self.allocator, .{
+            .callee = callee_id,
+            .selected_outputs = owned_outputs,
+            .function_id = derivative_id,
+        });
+        return derivative_id;
+    }
+};
+
+fn optional_indices_equal(lhs: ?[]const usize, rhs: ?[]const usize) bool {
+    const lhs_indices = lhs orelse return rhs == null;
+    const rhs_indices = rhs orelse return false;
+    return std.mem.eql(usize, lhs_indices, rhs_indices);
+}
+
+fn differentiate(
+    comptime mode: Mode,
+    allocator: std.mem.Allocator,
+    program: *pr.Program,
+    func: pr.Function,
+    name: []const u8,
+    primals: PrimalOutputs,
+    wrt: ?[]const usize,
+    of: ?[]const usize,
+) AdError!pr.Function {
+    var traversal = AdTraversal{ .allocator = allocator, .program = program };
+    defer traversal.deinit();
+    return try ad_impl(mode, &traversal, func, name, primals, wrt, of);
+}
+
 /// Reports whether PR defines dual values for a dtype.
 fn is_differentiable_dtype(dtype: pr.DType) bool {
     return switch (dtype) {
@@ -63,20 +145,17 @@ fn is_differentiable_dtype(dtype: pr.DType) bool {
 /// TODO(ad): Make the built-in differentiable dtype set an explicit AD policy.
 fn ad_impl(
     comptime mode: Mode,
-    allocator: std.mem.Allocator,
-    program: *pr.Program,
+    traversal: *AdTraversal,
     func: pr.Function,
     name: []const u8,
     primals: PrimalOutputs,
     wrt: ?[]const usize,
     of: ?[]const usize,
 ) AdError!pr.Function {
-    const initial_function_count = program.functions.len;
-    const initial_reservation_count = program.reserved_function_names.len;
-    errdefer {
-        program.functions = program.functions[0..initial_function_count];
-        program.reserved_function_names = program.reserved_function_names[0..initial_reservation_count];
-    }
+    const allocator = traversal.allocator;
+    const program = traversal.program;
+    const saved = program.checkpoint_appends();
+    errdefer program.restore_appends(saved);
 
     var primal_map = try allocator.alloc(?*pr.Var, func.var_count);
     defer allocator.free(primal_map);
@@ -148,7 +227,7 @@ fn ad_impl(
                 // Calls recursively transform their callee and therefore need
                 //  program-level handling outside the local op-rule registry.
                 switch (func.ops[i].params) {
-                    .call => |params| try vjp_call(ad_ctx, func.ops[i], params),
+                    .call => |params| try vjp_call(traversal, ad_ctx, func.ops[i], params),
                     else => try ops.vjp(ad_ctx, func.ops[i]),
                 }
             }
@@ -157,7 +236,7 @@ fn ad_impl(
             for (func.ops) |op| {
                 try ops.emit_primal(ad_ctx, op);
                 switch (op.params) {
-                    .call => |params| try jvp_call(ad_ctx, op, params),
+                    .call => |params| try jvp_call(traversal, ad_ctx, op, params),
                     else => try ops.jvp(ad_ctx, op),
                 }
             }
@@ -218,10 +297,7 @@ fn ad_impl(
     return try b.finish(returns);
 }
 
-fn vjp_call(ctx: ops.types.AdContext, op: *const pr.Op, params: pr.CallParams) AdError!void {
-    const callee = ctx.builder.program.get_function(params.callee) orelse
-        return error.CallUnresolvedCallee;
-
+fn vjp_call(traversal: *AdTraversal, ctx: ops.types.AdContext, op: *const pr.Op, params: pr.CallParams) AdError!void {
     const selected_outputs = try ctx.allocator.alloc(usize, op.outputs.len);
     defer ctx.allocator.free(selected_outputs);
     var selected_count: usize = 0;
@@ -232,20 +308,7 @@ fn vjp_call(ctx: ops.types.AdContext, op: *const pr.Op, params: pr.CallParams) A
     }
     if (selected_count == 0) return;
 
-    const base_name = try std.fmt.allocPrint(ctx.allocator, "{s}_vjp", .{params.callee});
-    defer ctx.allocator.free(base_name);
-    const derivative_name = try ctx.builder.program.unique_function_name(base_name);
-    const derivative = try ad_impl(
-        .vjp,
-        ctx.allocator,
-        ctx.builder.program,
-        callee,
-        derivative_name,
-        .skip,
-        null,
-        selected_outputs[0..selected_count],
-    );
-    try ctx.builder.program.add_function(derivative);
+    const derivative_id = try traversal.get_or_create_derivative(.vjp, params.callee, selected_outputs[0..selected_count]);
 
     const call_inputs = try ctx.allocator.alloc(*pr.Var, op.inputs.len + selected_count);
     defer ctx.allocator.free(call_inputs);
@@ -256,31 +319,15 @@ fn vjp_call(ctx: ops.types.AdContext, op: *const pr.Op, params: pr.CallParams) A
         input.* = ctx.get_cot(op.outputs[index]).?;
     }
 
-    const input_cotangents = try ctx.builder.call(derivative_name, call_inputs);
+    const input_cotangents = try ctx.builder.call(derivative_id, call_inputs);
     if (input_cotangents.len != op.inputs.len) return error.UnsupportedEqn;
     for (op.inputs, input_cotangents) |operand, cotangent| {
         try ctx.add_cot(operand.value, cotangent);
     }
 }
 
-fn jvp_call(ctx: ops.types.AdContext, op: *const pr.Op, params: pr.CallParams) AdError!void {
-    const callee = ctx.builder.program.get_function(params.callee) orelse
-        return error.CallUnresolvedCallee;
-
-    const base_name = try std.fmt.allocPrint(ctx.allocator, "{s}_jvp", .{params.callee});
-    defer ctx.allocator.free(base_name);
-    const derivative_name = try ctx.builder.program.unique_function_name(base_name);
-    const derivative = try ad_impl(
-        .jvp,
-        ctx.allocator,
-        ctx.builder.program,
-        callee,
-        derivative_name,
-        .skip,
-        null,
-        null,
-    );
-    try ctx.builder.program.add_function(derivative);
+fn jvp_call(traversal: *AdTraversal, ctx: ops.types.AdContext, op: *const pr.Op, params: pr.CallParams) AdError!void {
+    const derivative_id = try traversal.get_or_create_derivative(.jvp, params.callee, null);
 
     const call_inputs = try ctx.allocator.alloc(*pr.Var, op.inputs.len * 2);
     defer ctx.allocator.free(call_inputs);
@@ -292,7 +339,7 @@ fn jvp_call(ctx: ops.types.AdContext, op: *const pr.Op, params: pr.CallParams) A
         };
     }
 
-    const output_tangents = try ctx.builder.call(derivative_name, call_inputs);
+    const output_tangents = try ctx.builder.call(derivative_id, call_inputs);
     if (output_tangents.len != op.outputs.len) return error.UnsupportedEqn;
     for (op.outputs, output_tangents) |output, tangent| ctx.set_tangent(output, tangent);
 }
@@ -341,7 +388,7 @@ pub fn vjp(
     ///  source output and returns every parameter cotangent.
     opts: VjpOpts,
 ) AdError!pr.Function {
-    return try ad_impl(.vjp, allocator, program, func, name, .skip, opts.wrt, opts.of);
+    return try differentiate(.vjp, allocator, program, func, name, .skip, opts.wrt, opts.of);
 }
 
 /// Apply VJP and emit primal outputs before input cotangents.
@@ -362,7 +409,7 @@ pub fn vjp_with_value(
     name: []const u8,
     opts: VjpOpts,
 ) AdError!pr.Function {
-    return try ad_impl(.vjp, allocator, program, func, name, .emit, opts.wrt, opts.of);
+    return try differentiate(.vjp, allocator, program, func, name, .emit, opts.wrt, opts.of);
 }
 
 /// Forward-mode AD applies the differential of \(f: M \to N\):
@@ -392,7 +439,7 @@ pub fn vjp_with_value(
 /// \to T_{f_1(x)}Y_1 \times \cdots \times T_{f_m(x)}Y_m.
 /// $$
 pub fn jvp(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) AdError!pr.Function {
-    return try ad_impl(.jvp, allocator, program, func, name, .skip, null, null);
+    return try differentiate(.jvp, allocator, program, func, name, .skip, null, null);
 }
 
 /// Apply JVP and emit primal outputs before output tangents.
@@ -406,7 +453,7 @@ pub fn jvp(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function
 ///
 /// See `jvp`
 pub fn jvp_with_value(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) AdError!pr.Function {
-    return try ad_impl(.jvp, allocator, program, func, name, .emit, null, null);
+    return try differentiate(.jvp, allocator, program, func, name, .emit, null, null);
 }
 
 /// Emit a ones-like cotangent for VJP seeding.
@@ -432,7 +479,7 @@ test "vjp produces gradients matching input shapes" {
     const out_id = try b.multiply(add_id, c_id);
 
     const func = try b.finish(&.{out_id});
-    try program.add_function(func);
+    _ = try program.add_function(func);
 
     const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp", .{});
     try pr.validate_ops_in_func(vjp_func);
@@ -460,7 +507,7 @@ test "vjp selects output cotangent seeds" {
     const square = try b.multiply(x, x);
     const double = try b.add(x, x);
     const func = try b.finish(&.{ square, double });
-    try program.add_function(func);
+    _ = try program.add_function(func);
 
     const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp", .{
         .of = &.{1},
@@ -485,7 +532,7 @@ test "vjp accumulates duplicate output seeds" {
     const x = try b.param_tensor(.f32, &.{});
     const y = try b.multiply(x, x);
     const func = try b.finish(&.{y});
-    try program.add_function(func);
+    _ = try program.add_function(func);
 
     const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp", .{
         .of = &.{ 0, 0 },
@@ -506,7 +553,7 @@ test "vjp rejects invalid output selection" {
     const x = try b.param_tensor(.f32, &.{});
     const y = try b.multiply(x, x);
     const func = try b.finish(&.{y});
-    try program.add_function(func);
+    _ = try program.add_function(func);
 
     try std.testing.expectError(
         error.EmptyOutputSelection,
@@ -528,7 +575,7 @@ test "vjp_with_value returns primals plus gradients" {
     const x = try b.param_tensor(.f32, &.{ 2, 2 });
     const y = try b.multiply(x, x);
     const func = try b.finish(&.{y});
-    try program.add_function(func);
+    _ = try program.add_function(func);
 
     const vjp_func = try vjp_with_value(std.testing.allocator, &program, func, "vjp_with_value", .{});
     try pr.validate_ops_in_func(vjp_func);
@@ -553,7 +600,7 @@ test "dot_general vjp supports 2 batch dims" {
     });
 
     const func = try b.finish(&.{out});
-    try program.add_function(func);
+    _ = try program.add_function(func);
 
     const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp", .{});
     try pr.validate_ops_in_func(vjp_func);
@@ -588,7 +635,7 @@ test "dot_general vjp supports non-prefix batch dims" {
     });
 
     const func = try b.finish(&.{out});
-    try program.add_function(func);
+    _ = try program.add_function(func);
 
     const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp", .{});
     try pr.validate_ops_in_func(vjp_func);
@@ -612,7 +659,7 @@ test "dot_general vjp supports differing batch dim positions" {
     });
 
     const func = try b.finish(&.{out});
-    try program.add_function(func);
+    _ = try program.add_function(func);
 
     const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp", .{});
     try pr.validate_ops_in_func(vjp_func);
@@ -636,7 +683,7 @@ test "dot_general vjp supports multi-contract dims" {
     });
 
     const func = try b.finish(&.{out});
-    try program.add_function(func);
+    _ = try program.add_function(func);
 
     const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp", .{});
     try pr.validate_ops_in_func(vjp_func);
@@ -658,7 +705,7 @@ test "jvp produces tangent outputs matching function output shapes" {
     const out_id = try b.multiply(add_id, c_id);
 
     const func = try b.finish(&.{out_id});
-    try program.add_function(func);
+    _ = try program.add_function(func);
 
     const jvp_func = try jvp(std.testing.allocator, &program, func, "jvp");
     try pr.validate_ops_in_func(jvp_func);
@@ -675,29 +722,52 @@ test "jvp produces tangent outputs matching function output shapes" {
     }
 }
 
-test "jvp propagates through function calls" {
-    var program = pr.Program.init(std.testing.allocator);
-    defer program.deinit();
-
-    var callee_builder = try pr.FunctionBuilder.init(&program, "square");
+fn build_repeated_square_calls(program: *pr.Program) !pr.Function {
+    var callee_builder = try pr.FunctionBuilder.init(program, "square");
     defer callee_builder.deinit();
     const callee_input = try callee_builder.param_tensor(.f32, &.{});
     const callee_output = try callee_builder.multiply(callee_input, callee_input);
-    try program.add_function(try callee_builder.finish(&.{callee_output}));
+    const callee_id = try program.add_function(try callee_builder.finish(&.{callee_output}));
 
-    var caller_builder = try pr.FunctionBuilder.init(&program, "caller");
+    var caller_builder = try pr.FunctionBuilder.init(program, "caller");
     defer caller_builder.deinit();
     const caller_input = try caller_builder.param_tensor(.f32, &.{});
-    const caller_outputs = try caller_builder.call("square", &.{caller_input});
-    const caller = try caller_builder.finish(caller_outputs);
-    try program.add_function(caller);
+    const first_outputs = try caller_builder.call(callee_id, &.{caller_input});
+    const second_outputs = try caller_builder.call(callee_id, &.{caller_input});
+    const sum = try caller_builder.add(first_outputs[0], second_outputs[0]);
+    const caller = try caller_builder.finish(&.{sum});
+    _ = try program.add_function(caller);
+    return caller;
+}
 
+test "jvp reuses a callee derivative across call sites" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    const caller = try build_repeated_square_calls(&program);
     const differentiated = try jvp(std.testing.allocator, &program, caller, "caller_jvp");
-    try pr.validate_ops_in_func(differentiated);
+    _ = try program.add_function(differentiated);
+    try pr.validate_program(&program);
 
     try std.testing.expectEqual(@as(usize, 2), differentiated.params.len);
     try std.testing.expectEqual(@as(usize, 1), differentiated.returns.len);
     try std.testing.expect(program.get_function("square_jvp") != null);
+    try std.testing.expectEqual(@as(usize, 4), program.functions().len);
+}
+
+test "vjp reuses a callee derivative across call sites" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    const caller = try build_repeated_square_calls(&program);
+    const differentiated = try vjp(std.testing.allocator, &program, caller, "caller_vjp", .{});
+    _ = try program.add_function(differentiated);
+    try pr.validate_program(&program);
+
+    try std.testing.expectEqual(@as(usize, 2), differentiated.params.len);
+    try std.testing.expectEqual(@as(usize, 1), differentiated.returns.len);
+    try std.testing.expect(program.get_function("square_vjp") != null);
+    try std.testing.expectEqual(@as(usize, 4), program.functions().len);
 }
 
 test "jvp_with_value returns primals plus tangents" {
@@ -710,7 +780,7 @@ test "jvp_with_value returns primals plus tangents" {
     const x = try b.param_tensor(.f32, &.{ 2, 2 });
     const y = try b.multiply(x, x);
     const func = try b.finish(&.{y});
-    try program.add_function(func);
+    _ = try program.add_function(func);
 
     const jvp_func = try jvp_with_value(std.testing.allocator, &program, func, "jvp_with_value");
     try pr.validate_ops_in_func(jvp_func);
@@ -736,7 +806,7 @@ test "dot_general jvp with batch dims" {
     });
 
     const func = try b.finish(&.{out});
-    try program.add_function(func);
+    _ = try program.add_function(func);
 
     const jvp_func = try jvp(std.testing.allocator, &program, func, "jvp");
     try pr.validate_ops_in_func(jvp_func);

@@ -116,7 +116,7 @@ const CompiledContext = struct {
         const b = try builder.param_tensor(pr_dtype, &.{ shape.k, shape.n });
         const result = try builder.mm(a, b);
         const function = try builder.finish(&.{result});
-        try program.add_function(function);
+        _ = try program.add_function(function);
 
         var pipeline = zg.Pipeline.init(self.allocator);
         defer pipeline.deinit();

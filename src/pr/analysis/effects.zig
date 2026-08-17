@@ -20,8 +20,8 @@ fn function_may_have_side_effects_impl(
             if (params.has_side_effect) return true;
         },
         .call => |params| {
-            if (call_depth >= program.functions.len) return true;
-            const callee = program.get_function(params.callee) orelse return true;
+            if (call_depth >= program.functions().len) return true;
+            const callee = program.get_function_by_id(params.callee) orelse return true;
             if (function_may_have_side_effects_impl(program, callee, call_depth + 1)) {
                 return true;
             }
@@ -39,7 +39,7 @@ test function_may_have_side_effects {
     var pure_builder = try pr.FunctionBuilder.init(&program, "pure");
     defer pure_builder.deinit();
     const pure_input = try pure_builder.param_tensor(.f32, &.{2});
-    try program.add_function(try pure_builder.finish(&.{pure_input}));
+    _ = try program.add_function(try pure_builder.finish(&.{pure_input}));
 
     var effectful_builder = try pr.FunctionBuilder.init(&program, "effectful");
     defer effectful_builder.deinit();
@@ -48,21 +48,21 @@ test function_may_have_side_effects {
         .target_name = "test.effectful",
         .has_side_effect = true,
     }, &.{effectful_input}, &.{effectful_input.aval});
-    try program.add_function(try effectful_builder.finish(effectful_outputs));
+    const effectful_id = try program.add_function(try effectful_builder.finish(effectful_outputs));
 
     var caller_builder = try pr.FunctionBuilder.init(&program, "caller");
     defer caller_builder.deinit();
     const caller_input = try caller_builder.param_tensor(.f32, &.{2});
-    const caller_outputs = try caller_builder.call("effectful", &.{caller_input});
-    try program.add_function(try caller_builder.finish(caller_outputs));
+    const caller_outputs = try caller_builder.call(effectful_id, &.{caller_input});
+    const caller_id = try program.add_function(try caller_builder.finish(caller_outputs));
 
-    try testing.expect(!function_may_have_side_effects(&program, program.functions[0]));
-    try testing.expect(function_may_have_side_effects(&program, program.functions[1]));
-    try testing.expect(function_may_have_side_effects(&program, program.functions[2]));
+    try testing.expect(!function_may_have_side_effects(&program, program.functions()[0]));
+    try testing.expect(function_may_have_side_effects(&program, program.functions()[1]));
+    try testing.expect(function_may_have_side_effects(&program, program.functions()[2]));
 
-    program.functions[2].ops[0].params.call.callee = "caller";
-    try testing.expect(function_may_have_side_effects(&program, program.functions[2]));
+    program.functions()[2].ops[0].params.call.callee = caller_id;
+    try testing.expect(function_may_have_side_effects(&program, program.functions()[2]));
 
-    program.functions[2].ops[0].params.call.callee = "missing";
-    try testing.expect(function_may_have_side_effects(&program, program.functions[2]));
+    program.functions()[2].ops[0].params.call.callee = @enumFromInt(99);
+    try testing.expect(function_may_have_side_effects(&program, program.functions()[2]));
 }

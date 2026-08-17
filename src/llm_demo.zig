@@ -138,11 +138,12 @@ pub fn run_llm_train_demo(
     const dev_x = try host_x.to_device(executor);
     const dev_y = try host_y.to_device(executor);
 
+    const entry_function = program.get_function("llm_ft_step") orelse return error.NoEntry;
     var state = try train.TrainState.init(
         allocator,
         exe,
         &.{ dev_w_emb, dev_w_out, dev_b, dev_x, dev_y },
-        program.output_arity("llm_ft_step"),
+        entry_function.returns.len,
         .{ .non_donatable_input_indices = donate },
     );
     defer state.deinit(.all);

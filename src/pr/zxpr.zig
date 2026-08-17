@@ -52,9 +52,10 @@ pub fn emit_program(program: *const pr.Program, writer: *Writer, cfg: Config) !v
             };
             const zx_cfg = style.config(mode, zx.style_opts);
 
-            for (program.functions, 0..) |func, i| {
+            for (program.functions(), program.function_ids(), 0..) |func, function_id, i| {
                 if (i > 0) try writer.writeAll("\n");
-                try emit(func, writer, zx_cfg);
+                var emitter = Emitter.init(writer, func, function_id, zx_cfg);
+                try emitter.emit();
             }
         },
     }
@@ -62,7 +63,7 @@ pub fn emit_program(program: *const pr.Program, writer: *Writer, cfg: Config) !v
 
 /// Emit ZXPR representation of a function.
 pub fn emit(func: pr.Function, writer: *Writer, cfg: style.Config) !void {
-    var emitter = Emitter.init(writer, func, cfg);
+    var emitter = Emitter.init(writer, func, null, cfg);
     try emitter.emit();
 }
 
@@ -77,7 +78,7 @@ pub fn emit_param_line(v: *const pr.Var, writer: *Writer) !void {
         .regions = &.{},
         .var_count = 0,
     };
-    var emitter = Emitter.init(writer, dummy_func, style.config(.plain, .{}));
+    var emitter = Emitter.init(writer, dummy_func, null, style.config(.plain, .{}));
     try emitter.emit_var_with_type(v);
 }
 
@@ -91,13 +92,13 @@ pub fn emit_op_line(op: *const pr.Op, writer: *Writer) !void {
         .regions = &.{},
         .var_count = 0,
     };
-    var emitter = Emitter.init(writer, dummy_func, style.config(.plain, .{}));
+    var emitter = Emitter.init(writer, dummy_func, null, style.config(.plain, .{}));
     try emitter.emit_binding(op);
 }
 
 /// Emit a region block: header + ops + footer.
 pub fn emit_region_block(func: pr.Function, region: pr.Region, writer: *Writer) !void {
-    var emitter = Emitter.init(writer, func, style.config(.plain, .{}));
+    var emitter = Emitter.init(writer, func, null, style.config(.plain, .{}));
     try emitter.emit_region_start(0, region);
     for (region.op_ids) |op_id| {
         const op = func.op_by_id(op_id) orelse continue;
@@ -209,6 +210,39 @@ test "zxpr kernelize region annotations" {
     try std.testing.expect(std.mem.indexOf(u8, result, "<") != null);
 }
 
+test "program zxpr exposes monotonic function identities" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    const saved = program.checkpoint_appends();
+    var removed_builder = try pr.FunctionBuilder.init(&program, "removed");
+    defer removed_builder.deinit();
+    _ = try program.add_function(try removed_builder.finish(&.{}));
+    program.restore_appends(saved);
+
+    var callee_builder = try pr.FunctionBuilder.init(&program, "callee");
+    defer callee_builder.deinit();
+    const callee_input = try callee_builder.param_tensor(.f32, &.{});
+    const callee_id = try program.add_function(try callee_builder.finish(&.{callee_input}));
+
+    var caller_builder = try pr.FunctionBuilder.init(&program, "caller");
+    defer caller_builder.deinit();
+    const caller_input = try caller_builder.param_tensor(.f32, &.{});
+    const outputs = try caller_builder.call(callee_id, &.{caller_input});
+    _ = try program.add_function(try caller_builder.finish(outputs));
+
+    var writer: Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    try emit_program(&program, &writer.writer, .{
+        .target = .{ .file = "" },
+        .spec = .{ .zxpr = .{ .mode = .plain } },
+    });
+
+    const output = writer.written();
+    try std.testing.expect(std.mem.indexOf(u8, output, "zxpr @1 callee") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "callee=@1") != null);
+}
+
 test "emit_program binary format parses" {
     var program = pr.Program.init(std.testing.allocator);
     defer program.deinit();
@@ -217,7 +251,7 @@ test "emit_program binary format parses" {
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{1});
     const func = try b.finish(&.{x});
-    try program.add_function(func);
+    _ = try program.add_function(func);
 
     var output_writer: Writer.Allocating = .init(std.testing.allocator);
     defer output_writer.deinit();
@@ -227,5 +261,5 @@ test "emit_program binary format parses" {
 
     var parsed = try serialize.parse(std.testing.allocator, bytes);
     defer parsed.deinit();
-    try std.testing.expectEqualStrings("main", parsed.functions[0].name);
+    try std.testing.expectEqualStrings("main", parsed.functions()[0].name);
 }

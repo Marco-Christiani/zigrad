@@ -44,7 +44,7 @@ test "emit_program includes entry header and zxpr output" {
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{1});
     const func = try b.finish(&.{x});
-    try program.add_function(func);
+    _ = try program.add_function(func);
 
     var writer_state = std.Io.Writer.Allocating.init(testing.allocator);
     defer writer_state.deinit();
@@ -58,7 +58,7 @@ test "emit_program includes entry header and zxpr output" {
     defer testing.allocator.free(out);
 
     try testing.expect(std.mem.indexOf(u8, out, "entry: test_main") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "zxpr main_fn") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "zxpr @0 main_fn") != null);
 }
 
 test "emit_program json format" {
@@ -71,7 +71,7 @@ test "emit_program json format" {
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{1});
     const func = try b.finish(&.{x});
-    try program.add_function(func);
+    _ = try program.add_function(func);
 
     var writer_state = std.Io.Writer.Allocating.init(testing.allocator);
     defer writer_state.deinit();

@@ -88,11 +88,11 @@ pub const OutlineCandidates = struct {
             const result = try outline.apply(
                 program,
                 ctx.allocator,
-                request.function_index,
+                request.function_id,
                 request.region.id,
                 .{ .function_annotations = request.region.annotations },
             );
-            try consume_nested_requests(program, result.function_index);
+            try consume_nested_requests(program, result.function_id);
         }
         return program;
     }
@@ -111,8 +111,10 @@ pub const DiscoverCandidates = struct {
     providers: []const kernel.KernelProvider,
 
     pub fn run(self: DiscoverCandidates, program: Input, ctx: *compilation.Context) !Output {
-        for (program.functions) |*func| {
-            try discover_function(program.allocator(), ctx.allocator, func, self.providers);
+        for (program.functions(), program.function_ids()) |func, function_id| {
+            var updated = func;
+            try discover_function(program.allocator(), ctx.allocator, &updated, self.providers);
+            program.replace_function(function_id, updated) catch unreachable;
         }
         return program;
     }
@@ -201,27 +203,27 @@ fn ranges_overlap(existing: DiscoveredRange, start: usize, matched: kernel.Match
 }
 
 const OutlineRequest = struct {
-    function_index: usize,
+    function_id: pr.FunctionId,
     region: pr.Region,
 };
 
 fn find_outermost_request(program: *const pr.Program) kernel.AnnotationError!?OutlineRequest {
     var found: ?OutlineRequest = null;
-    for (program.functions, 0..) |func, function_index| {
+    for (program.functions(), program.function_ids()) |func, function_id| {
         if (try kernel.requested_providers(func) != null) continue;
         for (func.regions) |region| {
             if (try kernel.requested_providers(region) == null) continue;
             if (found == null or region.op_ids.len > found.?.region.op_ids.len) {
-                found = .{ .function_index = function_index, .region = region };
+                found = .{ .function_id = function_id, .region = region };
             }
         }
     }
     return found;
 }
 
-fn consume_nested_requests(program: *pr.Program, function_index: usize) std.mem.Allocator.Error!void {
+fn consume_nested_requests(program: *pr.Program, function_id: pr.FunctionId) std.mem.Allocator.Error!void {
     const arena = program.allocator();
-    const func = &program.functions[function_index];
+    var func = program.get_function_by_id(function_id).?;
     const has_nested_request = for (func.regions) |region| {
         if (region.find_annotation(kernel.provider_annotation_name) != null) break true;
     } else false;
@@ -239,6 +241,7 @@ fn consume_nested_requests(program: *pr.Program, function_index: usize) std.mem.
         updated.annotations = try annotations.toOwnedSlice(arena);
     }
     func.regions = regions;
+    program.replace_function(function_id, func) catch unreachable;
 }
 
 /// Kernelization pass state.
@@ -280,7 +283,7 @@ pub const KernelizePass = struct {
         else
             allocator;
 
-        for (program.functions) |func| {
+        for (program.functions()) |func| {
             self.kernelize_function(program, func, allocator, entries, entries_allocator) catch |err| {
                 if (!@import("builtin").is_test)
                     log.err("kernelization failed for function '{s}': {}", .{ func.name, err });
@@ -299,7 +302,7 @@ pub const KernelizePass = struct {
     ) !void {
         for (func.ops) |op| {
             if (op.prim() != .call) continue;
-            const candidate = program.get_function(op.params.call.callee) orelse return error.CallUnresolvedCallee;
+            const candidate = program.get_function_by_id(op.params.call.callee) orelse return error.CallUnresolvedCallee;
             const provider_request = (try kernel.requested_providers(candidate)) orelse continue;
             const function_fingerprint = try fingerprint.function(temp_allocator, candidate);
             const selection_key = try kernel.make_selection_key(
@@ -461,18 +464,18 @@ test "OutlineCandidates gives outer provider requests precedence" {
     const product = try builder.multiply(sum, rhs);
     try builder.pop_region();
     try builder.pop_region();
-    try program.add_function(try builder.finish(&.{product}));
+    _ = try program.add_function(try builder.finish(&.{product}));
 
     try outline_test_program(&program);
 
-    try testing.expectEqual(@as(usize, 2), program.functions.len);
-    try testing.expectEqual(pr.Prim.call, program.functions[0].ops[0].prim());
+    try testing.expectEqual(@as(usize, 2), program.functions().len);
+    try testing.expectEqual(pr.Prim.call, program.functions()[0].ops[0].prim());
     try testing.expectEqualStrings(
         "outer_provider",
-        (try kernel.requested_providers(program.functions[1])).?.at(0),
+        (try kernel.requested_providers(program.functions()[1])).?.at(0),
     );
-    try testing.expectEqual(@as(usize, 1), program.functions[1].regions.len);
-    try testing.expect((try kernel.requested_providers(program.functions[1].regions[0])) == null);
+    try testing.expectEqual(@as(usize, 1), program.functions()[1].regions.len);
+    try testing.expect((try kernel.requested_providers(program.functions()[1].regions[0])) == null);
 }
 
 test "DiscoverCandidates groups providers matching the same PR range" {
@@ -502,7 +505,7 @@ test "DiscoverCandidates groups providers matching the same PR range" {
     const lhs = try builder.param_tensor(.f32, &.{ 2, 3 });
     const rhs = try builder.param_tensor(.f32, &.{ 3, 2 });
     const result = try builder.mm(lhs, rhs);
-    try program.add_function(try builder.finish(&.{result}));
+    _ = try program.add_function(try builder.finish(&.{result}));
 
     var first = Matcher{ .name = "first" };
     var second = Matcher{ .name = "second" };
@@ -510,8 +513,8 @@ test "DiscoverCandidates groups providers matching the same PR range" {
     var ctx = compilation.Context{ .allocator = testing.allocator, .io = testing.io };
     _ = try (DiscoverCandidates{ .providers = &providers }).run(&program, &ctx);
 
-    try testing.expectEqual(@as(usize, 1), program.functions[0].regions.len);
-    const request = (try kernel.requested_providers(program.functions[0].regions[0])).?;
+    try testing.expectEqual(@as(usize, 1), program.functions()[0].regions.len);
+    const request = (try kernel.requested_providers(program.functions()[0].regions[0])).?;
     try testing.expectEqual(@as(usize, 2), request.len());
     try testing.expectEqualStrings("first", request.at(0));
     try testing.expectEqualStrings("second", request.at(1));
@@ -533,12 +536,12 @@ test "kernelize pass rewrites a selected function call" {
     try b.pop_region();
 
     const func = try b.finish(&.{y});
-    try program.add_function(func);
+    _ = try program.add_function(func);
     try outline_test_program(&program);
 
     var store = kernel.KernelStore.init(testing.allocator);
     defer store.deinit();
-    const selection_key = try make_test_selection_key(testing.allocator, "mock", program.functions[1]);
+    const selection_key = try make_test_selection_key(testing.allocator, "mock", program.functions()[1]);
     defer testing.allocator.free(selection_key.bytes);
     try select_provider_for_test(&store, selection_key, "mock", "stored_kernel_data");
 
@@ -551,8 +554,8 @@ test "kernelize pass rewrites a selected function call" {
     _ = try kp.run(&program, &ctx);
 
     // Region should be rewritten to custom_call.
-    try testing.expectEqual(@as(usize, 1), program.functions[0].ops.len);
-    const rewritten = program.functions[0].ops[0];
+    try testing.expectEqual(@as(usize, 1), program.functions()[0].ops.len);
+    const rewritten = program.functions()[0].ops[0];
     try testing.expectEqual(pr.Prim.custom_call, rewritten.prim());
 
     try testing.expectEqualStrings(kernel.dispatch_target_name, rewritten.params.custom_call.target_name);
@@ -575,12 +578,12 @@ test "kernelize pass preserves observable side effects" {
         .has_side_effect = true,
     }, &.{input}, &.{input.aval});
     try builder.pop_region();
-    try program.add_function(try builder.finish(outputs));
+    _ = try program.add_function(try builder.finish(outputs));
     try outline_test_program(&program);
 
     var store = kernel.KernelStore.init(testing.allocator);
     defer store.deinit();
-    const selection_key = try make_test_selection_key(testing.allocator, "mock", program.functions[1]);
+    const selection_key = try make_test_selection_key(testing.allocator, "mock", program.functions()[1]);
     defer testing.allocator.free(selection_key.bytes);
     try select_provider_for_test(&store, selection_key, "mock", "payload");
 
@@ -588,7 +591,7 @@ test "kernelize pass preserves observable side effects" {
     var ctx = compilation.Context{ .allocator = testing.allocator, .io = testing.io };
     _ = try kernelize.run(&program, &ctx);
 
-    const rewritten = program.functions[0].ops[0];
+    const rewritten = program.functions()[0].ops[0];
     try testing.expectEqual(pr.Prim.custom_call, rewritten.prim());
     try testing.expect(rewritten.params.custom_call.has_side_effect);
 }
@@ -609,12 +612,12 @@ test "kernelize pass does not replace a declined function call" {
     try b.pop_region();
 
     const func = try b.finish(&.{y});
-    try program.add_function(func);
+    _ = try program.add_function(func);
     try outline_test_program(&program);
 
     var store = kernel.KernelStore.init(testing.allocator);
     defer store.deinit();
-    const selection_key = try make_test_selection_key(testing.allocator, "mock", program.functions[1]);
+    const selection_key = try make_test_selection_key(testing.allocator, "mock", program.functions()[1]);
     defer testing.allocator.free(selection_key.bytes);
     try store.put(selection_key, .{
         .candidate = .original,
@@ -630,8 +633,8 @@ test "kernelize pass does not replace a declined function call" {
     _ = try kp.run(&program, &ctx);
 
     // The original candidate is a normal PR call.
-    try testing.expectEqual(@as(usize, 1), program.functions[0].ops.len);
-    try testing.expectEqual(pr.Prim.call, program.functions[0].ops[0].prim());
+    try testing.expectEqual(@as(usize, 1), program.functions()[0].ops.len);
+    try testing.expectEqual(pr.Prim.call, program.functions()[0].ops[0].prim());
 }
 
 test "kernelize pass does not replace a call without a selection" {
@@ -650,7 +653,7 @@ test "kernelize pass does not replace a call without a selection" {
     try b.pop_region();
 
     const func = try b.finish(&.{y});
-    try program.add_function(func);
+    _ = try program.add_function(func);
     try outline_test_program(&program);
 
     // An empty store leaves every call unchanged.
@@ -666,8 +669,8 @@ test "kernelize pass does not replace a call without a selection" {
     _ = try kp.run(&program, &ctx);
 
     // The original candidate is a normal PR call.
-    try testing.expectEqual(@as(usize, 1), program.functions[0].ops.len);
-    try testing.expectEqual(pr.Prim.call, program.functions[0].ops[0].prim());
+    try testing.expectEqual(@as(usize, 1), program.functions()[0].ops.len);
+    try testing.expectEqual(pr.Prim.call, program.functions()[0].ops[0].prim());
 }
 
 test "kernelize pass does not reuse another provider selection" {
@@ -683,10 +686,10 @@ test "kernelize pass does not reuse another provider selection" {
     const output = try builder.emit(.{ .exp = {} }, &.{input});
     try builder.pop_region();
     const function = try builder.finish(&.{output});
-    try program.add_function(function);
+    _ = try program.add_function(function);
     try outline_test_program(&program);
 
-    const other_key = try make_test_selection_key(testing.allocator, "other", program.functions[1]);
+    const other_key = try make_test_selection_key(testing.allocator, "other", program.functions()[1]);
     defer testing.allocator.free(other_key.bytes);
     var store = kernel.KernelStore.init(testing.allocator);
     defer store.deinit();
@@ -699,7 +702,7 @@ test "kernelize pass does not reuse another provider selection" {
     var context = compilation.Context{ .allocator = testing.allocator, .io = testing.io };
     _ = try kernelize.run(&program, &context);
 
-    try testing.expectEqual(pr.Prim.call, program.functions[0].ops[0].prim());
+    try testing.expectEqual(pr.Prim.call, program.functions()[0].ops[0].prim());
 }
 
 test "kernelize pass rewrites a multi-output function call" {
@@ -720,11 +723,11 @@ test "kernelize pass rewrites a multi-output function call" {
     try b.pop_region();
 
     const func = try b.finish(&.{ a, b_out });
-    try program.add_function(func);
+    _ = try program.add_function(func);
     try outline_test_program(&program);
-    const call_outputs = program.functions[0].ops[0].outputs;
+    const call_outputs = program.functions()[0].ops[0].outputs;
 
-    const selection_key = try make_test_selection_key(testing.allocator, "mock", program.functions[1]);
+    const selection_key = try make_test_selection_key(testing.allocator, "mock", program.functions()[1]);
     defer testing.allocator.free(selection_key.bytes);
 
     var store = kernel.KernelStore.init(testing.allocator);
@@ -739,8 +742,8 @@ test "kernelize pass rewrites a multi-output function call" {
     var ctx = compilation.Context{ .allocator = testing.allocator, .io = std.testing.io };
     _ = try kp.run(&program, &ctx);
 
-    try testing.expectEqual(@as(usize, 1), program.functions[0].ops.len);
-    const rewritten = program.functions[0].ops[0];
+    try testing.expectEqual(@as(usize, 1), program.functions()[0].ops.len);
+    const rewritten = program.functions()[0].ops[0];
     try testing.expectEqual(pr.Prim.custom_call, rewritten.prim());
 
     try testing.expectEqual(@as(usize, 2), rewritten.outputs.len);
@@ -771,12 +774,12 @@ test "kernelize pass shares selections for equal functions" {
     try b.pop_region();
 
     const func = try b.finish(&.{ out_a, out_b });
-    try program.add_function(func);
+    _ = try program.add_function(func);
     try outline_test_program(&program);
 
     var store = kernel.KernelStore.init(testing.allocator);
     defer store.deinit();
-    const selection_key = try make_test_selection_key(testing.allocator, "mock", program.functions[1]);
+    const selection_key = try make_test_selection_key(testing.allocator, "mock", program.functions()[1]);
     defer testing.allocator.free(selection_key.bytes);
     try select_provider_for_test(&store, selection_key, "mock", "payload");
 
@@ -789,7 +792,7 @@ test "kernelize pass shares selections for equal functions" {
     _ = try kp.run(&program, &ctx);
 
     // Both calls use the shared selection.
-    const ops = program.functions[0].ops;
+    const ops = program.functions()[0].ops;
     try testing.expectEqual(@as(usize, 2), ops.len);
     try testing.expectEqual(pr.Prim.custom_call, ops[0].prim());
     try testing.expectEqual(pr.Prim.custom_call, ops[1].prim());
@@ -817,12 +820,12 @@ test "kernelize pass separates functions with different shapes" {
     try b.pop_region();
 
     const func = try b.finish(&.{ out_small, out_large });
-    try program.add_function(func);
+    _ = try program.add_function(func);
     try outline_test_program(&program);
 
     var store = kernel.KernelStore.init(testing.allocator);
     defer store.deinit();
-    const selection_key = try make_test_selection_key(testing.allocator, "mock", program.functions[1]);
+    const selection_key = try make_test_selection_key(testing.allocator, "mock", program.functions()[1]);
     defer testing.allocator.free(selection_key.bytes);
     try select_provider_for_test(&store, selection_key, "mock", "payload");
 
@@ -835,7 +838,7 @@ test "kernelize pass separates functions with different shapes" {
     _ = try kp.run(&program, &ctx);
 
     // Only `region_small` has a store selection. `region_large` is a call.
-    const ops = program.functions[0].ops;
+    const ops = program.functions()[0].ops;
     try testing.expectEqual(@as(usize, 2), ops.len);
     try testing.expectEqual(pr.Prim.custom_call, ops[0].prim());
     try testing.expectEqual(pr.Prim.call, ops[1].prim());

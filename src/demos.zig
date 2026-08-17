@@ -21,7 +21,7 @@ pub fn build_demo_program(allocator: std.mem.Allocator) !zg.pr.Program {
     const out_id = try b.multiply(add_id, c_id);
 
     const func = try b.finish(&.{out_id});
-    try program.add_function(func);
+    _ = try program.add_function(func);
 
     return program;
 }
@@ -124,7 +124,7 @@ pub fn run_custom_call_negative(
     }, &.{x}, &.{x.aval});
     const y = outputs[0];
     const func = try b.finish(&.{y});
-    try program.add_function(func);
+    _ = try program.add_function(func);
 
     var exe = pipeline.run(
         zg.Executor.LoadedProgram,
@@ -149,9 +149,9 @@ pub fn run_vjp_demo(
     var program = try build_demo_program(allocator);
     defer program.deinit();
 
-    const fwd = program.functions[0];
+    const fwd = program.get_function("main") orelse unreachable;
     const vjp = try zg.pr.ad.vjp(allocator, &program, fwd, "main_vjp", .{});
-    try program.add_function(vjp);
+    _ = try program.add_function(vjp);
 
     var exe = try pipeline.run(
         zg.Executor.LoadedProgram,
@@ -412,11 +412,12 @@ pub fn run_train_demo(
     // TrainState releases the device tensors.
     defer dev_tree.deinit();
 
+    const entry_function = program.get_function("train_step") orelse return error.NoEntry;
     var state = try train.TrainState.init(
         allocator,
         exe,
         dev_tree.leaves,
-        program.output_arity("train_step"),
+        entry_function.returns.len,
         .{ .non_donatable_input_indices = donate },
     );
     defer state.deinit(.all);
@@ -760,7 +761,7 @@ pub fn print_pr(
     var program = try build_demo_program(allocator);
     defer program.deinit();
 
-    const fwd = program.functions[0];
+    const fwd = program.get_function("main") orelse unreachable;
     const vjp_func = try zg.pr.ad.vjp(allocator, &program, fwd, "main_vjp", .{});
 
     var stdout_buffer: [8192]u8 = undefined;
@@ -857,9 +858,9 @@ pub fn print_tvm_kernelize_pr(
     const out = try mul.add(d);
     const out_var = try out.get_var();
     const func_result = try builder.finish(&.{out_var});
-    try program.add_function(func_result);
+    _ = try program.add_function(func_result);
 
-    const func = program.functions[0];
+    const func = program.get_function("main") orelse unreachable;
 
     var stdout_buffer: [8192]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
@@ -936,7 +937,7 @@ fn build_kernelized_demo_program(
     const out_id = try b.multiply(add_id, c_id);
 
     const func = try b.finish(&.{out_id});
-    try program.add_function(func);
+    _ = try program.add_function(func);
     return program;
 }
 
@@ -1076,9 +1077,9 @@ pub fn print_tvm_attention_pr(
 
     const out_var = try out.get_var();
     const func_result = try builder.finish(&.{out_var});
-    try program.add_function(func_result);
+    _ = try program.add_function(func_result);
 
-    const func = program.functions[0];
+    const func = program.get_function("attention") orelse unreachable;
 
     var stdout_buffer: [16384]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);

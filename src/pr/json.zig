@@ -15,8 +15,15 @@ const Writer = std.Io.Writer;
 /// Parameters and operations are nodes. Each operand use creates an edge from
 ///  its defining node.
 pub fn emit(func: pr.Function, writer: *Writer) !void {
+    return try emit_function(func, null, writer);
+}
+
+fn emit_function(func: pr.Function, function_id: ?pr.FunctionId, writer: *Writer) !void {
     try writer.writeAll("{");
 
+    if (function_id) |id| {
+        try writer.print("\"id\":{d},", .{@intFromEnum(id)});
+    }
     try writer.writeAll("\"name\":");
     try write_json_string(writer, func.name);
     try writer.writeAll(",\"annotations\":");
@@ -72,14 +79,10 @@ pub fn emit(func: pr.Function, writer: *Writer) !void {
 
 /// Emit a Program as a JSON array of function graphs.
 pub fn emit_program(program: *const pr.Program, writer: *Writer) !void {
-    if (program.functions.len == 1) {
-        try emit(program.functions[0], writer);
-        return;
-    }
     try writer.writeAll("[");
-    for (program.functions, 0..) |func, i| {
+    for (program.functions(), program.function_ids(), 0..) |func, function_id, i| {
         if (i > 0) try writer.writeAll(",");
-        try emit(func, writer);
+        try emit_function(func, function_id, writer);
     }
     try writer.writeAll("]\n");
 }
@@ -373,8 +376,7 @@ fn emit_param_attrs(writer: *Writer, op: *const pr.Op) !void {
         },
         .call => |cp| {
             try open_attrs(writer, &has_attr);
-            try writer.writeAll("\"callee\":");
-            try write_json_string(writer, cp.callee);
+            try writer.print("\"callee\":{d}", .{@intFromEnum(cp.callee)});
         },
         .custom_call => |cc| {
             try open_attrs(writer, &has_attr);
@@ -806,13 +808,13 @@ test emit_program {
     defer b1.deinit();
     const x = try b1.param_tensor(.f32, &.{4});
     const func1 = try b1.finish(&.{x});
-    try program.add_function(func1);
+    _ = try program.add_function(func1);
 
     var b2 = try pr.FunctionBuilder.init(&program, "f2");
     defer b2.deinit();
     const y = try b2.param_tensor(.f32, &.{8});
     const func2 = try b2.finish(&.{y});
-    try program.add_function(func2);
+    _ = try program.add_function(func2);
 
     var buf: [4096]u8 = undefined;
     var w: Writer = .fixed(&buf);
@@ -823,4 +825,52 @@ test emit_program {
     try std.testing.expect(result[0] == '[');
     try std.testing.expect(std.mem.indexOf(u8, result, "\"name\":\"f1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"name\":\"f2\"") != null);
+}
+
+test "emit_program keeps the array schema for one function" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var builder = try pr.FunctionBuilder.init(&program, "main");
+    defer builder.deinit();
+    const x = try builder.param_tensor(.f32, &.{1});
+    _ = try program.add_function(try builder.finish(&.{x}));
+
+    var buf: [2048]u8 = undefined;
+    var writer: Writer = .fixed(&buf);
+    try emit_program(&program, &writer);
+
+    const result = writer.buffered();
+    try std.testing.expect(std.mem.startsWith(u8, result, "["));
+    try std.testing.expect(std.mem.endsWith(u8, result, "]\n"));
+}
+
+test "emit_program identifies monotonic call targets" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    const checkpoint = program.checkpoint_appends();
+    var removed = try pr.FunctionBuilder.init(&program, "removed");
+    defer removed.deinit();
+    _ = try program.add_function(try removed.finish(&.{}));
+    program.restore_appends(checkpoint);
+
+    var callee = try pr.FunctionBuilder.init(&program, "callee");
+    defer callee.deinit();
+    const callee_input = try callee.param_tensor(.f32, &.{});
+    const callee_id = try program.add_function(try callee.finish(&.{callee_input}));
+
+    var caller = try pr.FunctionBuilder.init(&program, "caller");
+    defer caller.deinit();
+    const caller_input = try caller.param_tensor(.f32, &.{});
+    const outputs = try caller.call(callee_id, &.{caller_input});
+    _ = try program.add_function(try caller.finish(outputs));
+
+    var output: Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try emit_program(&program, &output.writer);
+
+    const json = output.written();
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"id\":1,\"name\":\"callee\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"callee\":1") != null);
 }

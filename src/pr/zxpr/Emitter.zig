@@ -28,13 +28,15 @@ const Self = @This();
 
 writer: *Writer,
 func: pr.Function,
+function_id: ?pr.FunctionId,
 indent: []const u8,
 styler: style.Styler,
 
-pub fn init(writer: *Writer, func: pr.Function, cfg: style.Config) Self {
+pub fn init(writer: *Writer, func: pr.Function, function_id: ?pr.FunctionId, cfg: style.Config) Self {
     return .{
         .writer = writer,
         .func = func,
+        .function_id = function_id,
         .indent = "  ",
         .styler = style.Styler.init(writer, cfg),
     };
@@ -46,6 +48,9 @@ pub fn emit(self: *Self) !void {
 
     try self.styler.write_keyword("zxpr");
     try w.writeAll(" ");
+    if (self.function_id) |id| {
+        try w.print("@{d} ", .{@intFromEnum(id)});
+    }
     try self.styler.write_identifier(self.func.name);
     if (self.func.annotations.len > 0) {
         try self.styler.write_region("[");

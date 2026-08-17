@@ -44,8 +44,9 @@ pub fn lower_function_to_mlir(allocator: std.mem.Allocator, func: pr.Function, o
     var program = pr.Program.init(allocator);
     defer program.deinit();
 
-    program.add_function(func) catch |err| switch (err) {
+    _ = program.add_function(func) catch |err| switch (err) {
         error.DuplicateFunctionName => return error.InvalidProgram,
+        error.FunctionIdExhausted => return error.InvalidProgram,
         error.OutOfMemory => return error.OutOfMemory,
     };
     return try lower_program_to_mlir(allocator, &program, func.name, out);
@@ -598,7 +599,7 @@ test "lowering produces verified bytecode" {
         const add_id = try b.add(mm_id, c);
         const out_id = try b.multiply(add_id, c);
         const func = try b.finish(&.{out_id});
-        try program.add_function(func);
+        _ = try program.add_function(func);
     }
 
     const bc = try lower_program_to_mlir(std.testing.allocator, &program, null, .mlir_bytecode);
@@ -664,13 +665,13 @@ test "lowering keeps non-entry functions when entry_name is set" {
     defer fwd_builder.deinit();
     const fwd_x = try fwd_builder.param_tensor(.f32, &.{2});
     const fwd = try fwd_builder.finish(&.{fwd_x});
-    try program.add_function(fwd);
+    _ = try program.add_function(fwd);
 
     var bwd_builder = try pr.FunctionBuilder.init(&program, "backward");
     defer bwd_builder.deinit();
     const bwd_x = try bwd_builder.param_tensor(.f32, &.{2});
     const bwd = try bwd_builder.finish(&.{bwd_x});
-    try program.add_function(bwd);
+    _ = try program.add_function(bwd);
 
     const text = try lower_program_to_mlir(testing.allocator, &program, "backward", .mlir_text);
     defer testing.allocator.free(text);
@@ -685,23 +686,31 @@ test "lowering renames non-entry main when entry_name differs" {
     var program = pr.Program.init(testing.allocator);
     defer program.deinit();
 
+    const checkpoint = program.checkpoint_appends();
+    var removed_builder = try pr.FunctionBuilder.init(&program, "removed");
+    defer removed_builder.deinit();
+    _ = try program.add_function(try removed_builder.finish(&.{}));
+    program.restore_appends(checkpoint);
+
     var main_builder = try pr.FunctionBuilder.init(&program, "main");
     defer main_builder.deinit();
     const main_x = try main_builder.param_tensor(.f32, &.{2});
     const main_fn = try main_builder.finish(&.{main_x});
-    try program.add_function(main_fn);
+    const main_id = try program.add_function(main_fn);
 
     var other_builder = try pr.FunctionBuilder.init(&program, "backward");
     defer other_builder.deinit();
     const other_x = try other_builder.param_tensor(.f32, &.{2});
-    const other_fn = try other_builder.finish(&.{other_x});
-    try program.add_function(other_fn);
+    const other_result = try other_builder.call(main_id, &.{other_x});
+    const other_fn = try other_builder.finish(other_result);
+    _ = try program.add_function(other_fn);
 
     const text = try lower_program_to_mlir(testing.allocator, &program, "backward", .mlir_text);
     defer testing.allocator.free(text);
 
     try testing.expect(std.mem.indexOf(u8, text, "func.func @main") != null);
     try testing.expect(std.mem.indexOf(u8, text, "func.func @main_non_entry_0") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "call @main_non_entry_0") != null);
 }
 
 test "lowering supports reshape/broadcast/transpose" {
@@ -717,7 +726,7 @@ test "lowering supports reshape/broadcast/transpose" {
     const y = try b.broadcast_in_dim(r, &.{ 2, 6 }, &.{1});
 
     const func = try b.finish(&.{y});
-    try program.add_function(func);
+    _ = try program.add_function(func);
 
     const bc = try lower_program_to_mlir(std.testing.allocator, &program, null, .mlir_bytecode);
     defer std.testing.allocator.free(bc);
@@ -739,7 +748,7 @@ test "lowering supports custom_call" {
     const y = outputs[0];
 
     const func = try b.finish(&.{y});
-    try program.add_function(func);
+    _ = try program.add_function(func);
 
     const bc = try lower_program_to_mlir(std.testing.allocator, &program, null, .mlir_bytecode);
     defer std.testing.allocator.free(bc);
@@ -764,11 +773,11 @@ test "lowering supports multi-output custom_call" {
     try b.pop_region();
 
     const func = try b.finish(&.{ ex, lg });
-    try program.add_function(func);
+    _ = try program.add_function(func);
     try outline_kernel_requests_for_test(&program);
 
     const selected_device = @import("../../device.zig").Device{ .platform = .cpu };
-    const function_fingerprint = try fingerprint.function(testing.allocator, program.functions[1]);
+    const function_fingerprint = try fingerprint.function(testing.allocator, program.functions()[1]);
     const selection_key = try kernel_test.make_selection_key(
         testing.allocator,
         .{ .one = "mock" },
@@ -816,13 +825,13 @@ test "lowering supports vjp matmul demo" {
         const add_id = try b.add(mm_id, c);
         const out_id = try b.multiply(add_id, c);
         const func = try b.finish(&.{out_id});
-        try program.add_function(func);
+        _ = try program.add_function(func);
     }
 
-    const fwd = program.functions[0];
+    const fwd = program.get_function("main") orelse unreachable;
     const vjp_func = try @import("../../pr/ad.zig").vjp(std.testing.allocator, &program, fwd, "vjp", .{});
 
-    try program.add_function(vjp_func);
+    _ = try program.add_function(vjp_func);
     const bc = try lower_program_to_mlir(std.testing.allocator, &program, "vjp", .mlir_bytecode);
     defer std.testing.allocator.free(bc);
     try std.testing.expect(bc.len > 0);
@@ -841,7 +850,7 @@ test "lowering can outline via region annotation" {
     const d = try b.mm(a, c);
     try b.pop_region();
     const func = try b.finish(&.{d});
-    try program.add_function(func);
+    _ = try program.add_function(func);
 
     var pass_ctx = compilation.Context{ .allocator = std.testing.allocator, .io = std.testing.io };
     _ = try (outline.Pass{}).run(&program, &pass_ctx);
@@ -881,16 +890,16 @@ test "lower convolution" {
         },
     });
     const func = try b.finish(&.{output});
-    try program.add_function(func);
+    _ = try program.add_function(func);
 
     const text = try lower_program_to_mlir(testing.allocator, &program, null, .mlir_text);
     defer testing.allocator.free(text);
     try testing.expect(std.mem.indexOf(u8, text, "stablehlo.convolution") != null);
     try testing.expect(std.mem.indexOf(u8, text, "dim_numbers = [b, 0, 1, f]x[0, 1, i, o]->[b, 0, 1, f]") != null);
 
-    const forward = program.functions[0];
+    const forward = program.get_function("main") orelse unreachable;
     const vjp_func = try @import("../../pr/ad.zig").vjp(testing.allocator, &program, forward, "vjp", .{});
-    try program.add_function(vjp_func);
+    _ = try program.add_function(vjp_func);
     const vjp = try lower_program_to_mlir(testing.allocator, &program, "vjp", .mlir_bytecode);
     defer testing.allocator.free(vjp);
     if (vjp.len == 0) return error.EmptyConvolutionVjp;
@@ -916,7 +925,7 @@ test "lower operation outlines kernelize-annotated region" {
     try b.pop_region();
 
     const func = try b.finish(&.{out});
-    try program.add_function(func);
+    _ = try program.add_function(func);
     try outline_kernel_requests_for_test(&program);
 
     var artifact = try lower(testing.allocator, &program, null, .text);
@@ -946,7 +955,7 @@ test "lower operation outlines mm-add kernelize region" {
     try b.pop_region();
 
     const func = try b.finish(&.{out});
-    try program.add_function(func);
+    _ = try program.add_function(func);
     try outline_kernel_requests_for_test(&program);
 
     var artifact = try lower(testing.allocator, &program, null, .text);
@@ -975,7 +984,7 @@ test "lower operation outlines mm-log kernelize region" {
     try b.pop_region();
 
     const func = try b.finish(&.{out});
-    try program.add_function(func);
+    _ = try program.add_function(func);
     try outline_kernel_requests_for_test(&program);
 
     var artifact = try lower(testing.allocator, &program, null, .text);
@@ -1006,7 +1015,7 @@ test "lower operation outlines near-miss kernelize region" {
     try b.pop_region();
 
     const func = try b.finish(&.{out});
-    try program.add_function(func);
+    _ = try program.add_function(func);
     try outline_kernel_requests_for_test(&program);
 
     var artifact = try lower(testing.allocator, &program, null, .text);
@@ -1028,7 +1037,7 @@ test "lower operation produces StableHLO" {
     const z = try b.mm(x, y);
     const func = try b.finish(&.{z});
 
-    try program.add_function(func);
+    _ = try program.add_function(func);
     var output = try lower(std.testing.allocator, &program, null, .binary);
     defer output.deinit(std.testing.allocator);
 
@@ -1051,7 +1060,7 @@ test "lower operation emits stablehlo.custom_call" {
     }, &.{x}, &.{x.aval});
     const y = outputs[0];
     const func = try b.finish(&.{y});
-    try program.add_function(func);
+    _ = try program.add_function(func);
 
     var artifact = try lower(testing.allocator, &program, null, .text);
     defer artifact.deinit(testing.allocator);

@@ -47,10 +47,9 @@ pub fn run(
     defer allocator.free(serialized);
     var program = try zg.pr.serialize.parse(allocator, serialized);
     defer program.deinit();
-    const entry_name = opts.entry orelse switch (program.functions.len) {
-        1 => program.functions[0].name,
-        else => return error.EntryRequired,
-    };
+    const entry_id = try zg.mlir.lowering.resolve_entry_function(&program, opts.entry);
+    const entry = program.get_function_by_id(entry_id) orelse unreachable;
+    const entry_name = entry.name;
 
     var ctx = zg.CompilationCtx{
         .allocator = allocator,

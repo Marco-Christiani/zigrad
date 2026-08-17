@@ -56,8 +56,8 @@ fn emit_action(
         },
         .info => {
             try writer.print("size: {d} bytes\n", .{input_size});
-            try writer.print("functions: {d}\n", .{program.functions.len});
-            for (program.functions) |func| {
+            try writer.print("functions: {d}\n", .{program.functions().len});
+            for (program.functions()) |func| {
                 try writer.print(
                     "function {s}: {d} ops, {d} values\n",
                     .{ func.name, func.ops.len, func.var_count },
@@ -77,7 +77,7 @@ test "emit_action renders ZXPR and JSON" {
     const y = try b.param_tensor(.f32, &.{1});
     const sum = try b.add(x, y);
     const func = try b.finish(&.{sum});
-    try program.add_function(func);
+    _ = try program.add_function(func);
 
     for ([_]RenderFormat{ .zxpr, .json }) |format| {
         var output: Writer.Allocating = .init(std.testing.allocator);
@@ -85,7 +85,7 @@ test "emit_action renders ZXPR and JSON" {
         try emit_action(&program, 0, .{ .render = format }, &output.writer);
 
         const expected = switch (format) {
-            .zxpr => "zxpr main",
+            .zxpr => "zxpr @0 main",
             .json => "\"name\":\"main\"",
         };
         try std.testing.expect(std.mem.indexOf(u8, output.written(), expected) != null);
@@ -101,7 +101,7 @@ test "emit_action reports program contents" {
     const x = try b.param_tensor(.f32, &.{1});
     const y = try b.add(x, x);
     const func = try b.finish(&.{y});
-    try program.add_function(func);
+    _ = try program.add_function(func);
 
     var output: Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();

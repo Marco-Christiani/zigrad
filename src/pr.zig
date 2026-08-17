@@ -32,6 +32,8 @@ pub const ConcatenateParams = core.ConcatenateParams;
 pub const ReduceParams = core.ReduceParams;
 pub const Reduction = core.Reduction;
 pub const CallParams = core.CallParams;
+pub const FunctionId = core.FunctionId;
+pub const FunctionRegistrationError = core.FunctionRegistrationError;
 pub const CustomCallParams = core.CustomCallParams;
 
 // Core IR types

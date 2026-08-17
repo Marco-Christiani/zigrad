@@ -230,7 +230,7 @@ pub fn tune(
     var total_dedup: usize = 0;
     var total_original: usize = 0;
 
-    for (program.functions) |func| {
+    for (program.functions()) |func| {
         const stats = try tune_function(
             allocator,
             func,
@@ -569,7 +569,7 @@ fn expect_provider_selections(first_unsupported: bool) !void {
     try builder.pop_region();
 
     const function = try builder.finish(&.{ first_output, second_output });
-    try program.add_function(function);
+    _ = try program.add_function(function);
 
     var outline_ctx = @import("compilation.zig").Context{
         .allocator = testing.allocator,
@@ -594,8 +594,8 @@ fn expect_provider_selections(first_unsupported: bool) !void {
     try testing.expectEqual(@as(usize, 1), evaluator.calls);
     try testing.expectEqual(@as(usize, 2), result.store.selections.count());
 
-    const first_fingerprint = try fingerprint.function(testing.allocator, program.functions[1]);
-    const second_fingerprint = try fingerprint.function(testing.allocator, program.functions[2]);
+    const first_fingerprint = try fingerprint.function(testing.allocator, program.functions()[1]);
+    const second_fingerprint = try fingerprint.function(testing.allocator, program.functions()[2]);
 
     const first_key = try kernel.make_selection_key(
         testing.allocator,
@@ -646,7 +646,7 @@ test tune {
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const func = try b.finish(&.{x});
-    try program.add_function(func);
+    _ = try program.add_function(func);
 
     var result = try tune(std.testing.io, testing.allocator, &program, &.{}, .{
         .device = .{ .platform = .cpu },
@@ -668,7 +668,7 @@ test "tune requires outlined provider requests" {
     try builder.push_region("candidate", &.{kernel.provider_annotation("test")});
     const output = try builder.exp(input);
     try builder.pop_region();
-    try program.add_function(try builder.finish(&.{output}));
+    _ = try program.add_function(try builder.finish(&.{output}));
 
     try testing.expectError(
         error.ProviderRegionNotOutlined,
@@ -695,7 +695,7 @@ test "tune evaluates all providers for one callable" {
     try builder.push_region("candidate", &.{kernel.providers_annotation(&.{ "first", "second" })});
     const output = try builder.exp(input);
     try builder.pop_region();
-    try program.add_function(try builder.finish(&.{output}));
+    _ = try program.add_function(try builder.finish(&.{output}));
 
     var outline_ctx = @import("compilation.zig").Context{
         .allocator = testing.allocator,
@@ -715,7 +715,7 @@ test "tune evaluates all providers for one callable" {
     });
     defer result.deinit();
 
-    const function_fingerprint = try fingerprint.function(testing.allocator, program.functions[1]);
+    const function_fingerprint = try fingerprint.function(testing.allocator, program.functions()[1]);
     const key = try kernel.make_selection_key(
         testing.allocator,
         .{ .many = &.{ "first", "second" } },
@@ -745,7 +745,7 @@ test "tune retains original without an evaluator" {
     try builder.push_region("candidate", &.{kernel.provider_annotation("provider")});
     const output = try builder.exp(input);
     try builder.pop_region();
-    try program.add_function(try builder.finish(&.{output}));
+    _ = try program.add_function(try builder.finish(&.{output}));
     var outline_ctx = @import("compilation.zig").Context{
         .allocator = testing.allocator,
         .io = testing.io,
@@ -758,7 +758,7 @@ test "tune retains original without an evaluator" {
     });
     defer result.deinit();
 
-    const function_fingerprint = try fingerprint.function(testing.allocator, program.functions[1]);
+    const function_fingerprint = try fingerprint.function(testing.allocator, program.functions()[1]);
     const key = try kernel.make_selection_key(
         testing.allocator,
         .{ .one = "provider" },

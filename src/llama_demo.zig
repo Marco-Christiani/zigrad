@@ -336,11 +336,12 @@ pub fn run_llama_ft_demo(
         defer dev_tree.deinit();
 
         // Set up state as a convenience for training
+        const entry_function = program.get_function("llama_ft_step") orelse return error.NoEntry;
         var state = try train.TrainState.init(
             allocator,
             exe,
             dev_tree.leaves,
-            program.output_arity("llama_ft_step"),
+            entry_function.returns.len,
             .{ .non_donatable_input_indices = donate, .loss_dtype = loss_dtype },
         );
         defer state.deinit(.all);

@@ -4,7 +4,9 @@
 //!  and reconstructs derived def-use links while parsing.
 //!
 //! `emit` and `parse` cover whole programs. Public codec primitives expose the
-//!  same reflected encoding for individual fragments.
+//!  reflected encoding for individual fragments. Fragment call references retain
+//!  their program-local identities. Whole-program call references use
+//!  function-table ordinals.
 //!
 //! `schema_hash` identifies the reflected types and fixed outer layout for
 //!  stored fragments.
@@ -18,7 +20,7 @@ const Writer = std.Io.Writer;
 /// Eight-byte marker at the start of every PR wire document.
 pub const magic = "ZGPRWIRE";
 /// Current PR wire format version.
-pub const version: u32 = 6;
+pub const version: u32 = 7;
 
 // This count forces a wire-version decision when `Prim` or `Params` changes.
 const wire_prim_count = 29;
@@ -40,6 +42,7 @@ pub const schema_hash = compute_schema_hash();
 /// Errors produced while emitting a PR wire document.
 pub const EmitError = Writer.Error || error{
     LengthOverflow,
+    UnknownFunctionId,
 };
 
 const DecodeError = Allocator.Error || error{
@@ -58,7 +61,7 @@ const DecodeError = Allocator.Error || error{
 };
 
 /// Errors produced while parsing or validating a PR wire document.
-pub const ParseError = DecodeError || pr.ValidationError || error{
+pub const ParseError = DecodeError || pr.ValidationError || pr.FunctionRegistrationError || error{
     InvalidMagic,
     UnsupportedVersion,
     SchemaMismatch,
@@ -70,9 +73,9 @@ pub fn emit(program: *const pr.Program, writer: *Writer) EmitError!void {
     try writer.writeAll(magic);
     try writer.writeInt(u32, version, .little);
     try writer.writeInt(u64, schema_hash, .little);
-    try write_length(writer, program.functions.len);
+    try write_length(writer, program.functions().len);
 
-    for (program.functions) |func| {
+    for (program.functions()) |func| {
         try write_value([]const u8, writer, func.name);
         try write_value([]const pr.Annotation, writer, func.annotations);
         try writer.writeInt(u32, func.var_count, .little);
@@ -91,7 +94,7 @@ pub fn emit(program: *const pr.Program, writer: *Writer) EmitError!void {
             try write_length(writer, op.outputs.len);
             for (op.outputs) |output| try write_var_definition(writer, output);
 
-            try write_value(pr.Params, writer, op.params);
+            try write_program_params(program, writer, op.params);
         }
 
         try write_length(writer, func.regions.len);
@@ -106,6 +109,25 @@ pub fn emit(program: *const pr.Program, writer: *Writer) EmitError!void {
         for (func.returns) |return_var|
             try writer.writeInt(u32, return_var.id, .little);
     }
+}
+
+fn write_program_params(program: *const pr.Program, writer: *Writer, params: pr.Params) EmitError!void {
+    switch (params) {
+        .call => |call| {
+            try write_enum(pr.Prim, writer, .call);
+            const ordinal = function_ordinal(program, call.callee) orelse
+                return error.UnknownFunctionId;
+            try writer.writeInt(u32, ordinal, .little);
+        },
+        else => try write_value(pr.Params, writer, params),
+    }
+}
+
+fn function_ordinal(program: *const pr.Program, id: pr.FunctionId) ?u32 {
+    for (program.function_ids(), 0..) |function_id, index| {
+        if (function_id == id) return @intCast(index);
+    }
+    return null;
 }
 
 /// Parse and validate a complete PR program.
@@ -127,7 +149,10 @@ pub fn parse(backing_allocator: Allocator, bytes: []const u8) ParseError!pr.Prog
     const function_count = try reader.read_length();
     const functions = try arena.alloc(pr.Function, function_count);
     for (functions) |*func| func.* = try read_function(&reader, arena);
-    program.functions = functions;
+    for (functions, 0..) |func, ordinal| {
+        const id = try program.add_function(func);
+        std.debug.assert(@intFromEnum(id) == ordinal);
+    }
 
     if (reader.pos != bytes.len) return error.TrailingData;
     try pr.validate_program(&program);
@@ -588,7 +613,7 @@ fn make_test_program(backing_allocator: Allocator) !pr.Program {
         .inputs = call_inputs,
         .outputs = call_outputs,
         .params = .{ .call = .{
-            .callee = try arena.dupe(u8, "identity"),
+            .callee = @enumFromInt(1),
         } },
     };
 
@@ -644,7 +669,10 @@ fn make_test_program(backing_allocator: Allocator) !pr.Program {
         .regions = try arena.alloc(pr.Region, 0),
         .var_count = 1,
     };
-    program.functions = functions;
+    for (functions, 0..) |func, ordinal| {
+        const id = try program.add_function(func);
+        std.debug.assert(@intFromEnum(id) == ordinal);
+    }
     return program;
 }
 
@@ -663,13 +691,13 @@ test "binary PR round trip is byte stable" {
     defer parsed.deinit();
     try pr.validate_program(&parsed);
 
-    try std.testing.expectEqual(@as(usize, 2), parsed.functions[0].ops[1].outputs.len);
-    const literal = parsed.functions[0].ops[0].params.literal.f32;
+    try std.testing.expectEqual(@as(usize, 2), parsed.functions()[0].ops[1].outputs.len);
+    const literal = parsed.functions()[0].ops[0].params.literal.f32;
     try std.testing.expect(std.math.isNegativeInf(literal));
-    try std.testing.expect(parsed.functions[0].find_annotation("example.function").?.value.boolean);
+    try std.testing.expect(parsed.functions()[0].find_annotation("example.function").?.value.boolean);
 
-    const literal_op = parsed.functions[0].ops[0];
-    const custom_op = parsed.functions[0].ops[1];
+    const literal_op = parsed.functions()[0].ops[0];
+    const custom_op = parsed.functions()[0].ops[1];
     const literal_var = literal_op.outputs[0];
     try std.testing.expect(literal_var.defining_op == literal_op);
     try std.testing.expect(literal_var.first_use == &custom_op.inputs[1]);
@@ -681,7 +709,7 @@ test "binary PR round trip is byte stable" {
     try std.testing.expect(custom_op.inputs[1].next == &custom_op.inputs[0]);
     try std.testing.expectEqualStrings("payload", custom_op.params.custom_call.payload);
 
-    const region = parsed.functions[0].regions[0];
+    const region = parsed.functions()[0].regions[0];
     try std.testing.expectEqualStrings("serialized", region.name);
     try std.testing.expect(try @import("transform/outline.zig").is_requested(region));
     const providers = (try @import("../kernel.zig").requested_providers(region)).?;
@@ -692,10 +720,10 @@ test "binary PR round trip is byte stable" {
     try std.testing.expectEqualSlices(u8, &.{ 0, 127, 255 }, region.find_annotation("example.payload").?.value.bytes);
     try std.testing.expectEqualSlices(u32, &.{ 4, 9 }, region.op_ids);
 
-    const call_op = parsed.functions[0].ops[2];
-    try std.testing.expectEqualStrings("identity", call_op.params.call.callee);
+    const call_op = parsed.functions()[0].ops[2];
+    try std.testing.expectEqual(@as(pr.FunctionId, @enumFromInt(1)), call_op.params.call.callee);
     try std.testing.expectEqual(@as(usize, 1), call_op.outputs.len);
-    try std.testing.expect(parsed.functions[0].returns[0] == call_op.outputs[0]);
+    try std.testing.expect(parsed.functions()[0].returns[0] == call_op.outputs[0]);
     try std.testing.expect(call_op.outputs[0].first_use == null);
 
     var second: Writer.Allocating = .init(std.testing.allocator);
@@ -705,6 +733,45 @@ test "binary PR round trip is byte stable" {
     defer std.testing.allocator.free(second_bytes);
 
     try std.testing.expectEqualSlices(u8, first_bytes, second_bytes);
+}
+
+test "binary PR translates monotonic function identities to wire ordinals" {
+    var source = pr.Program.init(std.testing.allocator);
+    defer source.deinit();
+
+    var base_builder = try pr.FunctionBuilder.init(&source, "base");
+    defer base_builder.deinit();
+    const base_input = try base_builder.param_tensor(.f32, &.{});
+    _ = try source.add_function(try base_builder.finish(&.{base_input}));
+
+    const checkpoint = source.checkpoint_appends();
+    var removed_builder = try pr.FunctionBuilder.init(&source, "removed");
+    defer removed_builder.deinit();
+    const removed_input = try removed_builder.param_tensor(.f32, &.{});
+    _ = try source.add_function(try removed_builder.finish(&.{removed_input}));
+    source.restore_appends(checkpoint);
+
+    var callee_builder = try pr.FunctionBuilder.init(&source, "callee");
+    defer callee_builder.deinit();
+    const callee_input = try callee_builder.param_tensor(.f32, &.{});
+    const callee_id = try source.add_function(try callee_builder.finish(&.{callee_input}));
+    try std.testing.expectEqual(@as(pr.FunctionId, @enumFromInt(2)), callee_id);
+
+    var caller_builder = try pr.FunctionBuilder.init(&source, "caller");
+    defer caller_builder.deinit();
+    const caller_input = try caller_builder.param_tensor(.f32, &.{});
+    const outputs = try caller_builder.call(callee_id, &.{caller_input});
+    _ = try source.add_function(try caller_builder.finish(outputs));
+
+    var encoded: Writer.Allocating = .init(std.testing.allocator);
+    defer encoded.deinit();
+    try emit(&source, &encoded.writer);
+
+    var parsed = try parse(std.testing.allocator, encoded.written());
+    defer parsed.deinit();
+    const parsed_callee_id = parsed.get_function_id("callee").?;
+    const parsed_caller = parsed.get_function("caller").?;
+    try std.testing.expectEqual(parsed_callee_id, parsed_caller.ops[0].params.call.callee);
 }
 
 test "convolution parameters round trip" {
@@ -732,7 +799,7 @@ test "convolution parameters round trip" {
             .output_spatial_dimensions = &.{ 1, 2 },
         },
     });
-    try source.add_function(try builder.finish(&.{output}));
+    _ = try source.add_function(try builder.finish(&.{output}));
 
     var encoded: Writer.Allocating = .init(std.testing.allocator);
     defer encoded.deinit();
@@ -742,7 +809,7 @@ test "convolution parameters round trip" {
     var decoded = try parse(std.testing.allocator, bytes);
     defer decoded.deinit();
 
-    const params = decoded.functions[0].ops[0].params.convolution;
+    const params = decoded.functions()[0].ops[0].params.convolution;
     try std.testing.expectEqualSlices(i64, &.{ 2, 2 }, params.window_strides);
     try std.testing.expectEqualSlices(i64, &.{ 1, 1, 1, 1 }, params.padding);
     try std.testing.expectEqual(@as(i64, 3), params.dimensions.input_feature_dimension);
