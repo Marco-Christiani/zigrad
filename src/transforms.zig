@@ -4,10 +4,10 @@
 //!  inside a traced function body, not at the trace call site.
 //!
 //! The canonical use is `value_and_grad`, which:
-//!  1. Builds a sub-function from the loss closure,
+//!  1. Builds a sub-function from the differentiated closure,
 //!  2. Applies `pr.ad.vjp_with_value` to produce a VJP function,
 //!  3. Emits a call to the VJP function in the *outer* builder,
-//!  4. Returns both the loss value and a `Tree(Tensor)` of gradients.
+//!  4. Returns every source output and a `Tree(Tensor)` of gradients.
 //!
 //! Because the transform runs inside the trace, the caller can compose it
 //!  with arbitrary traced logic (optimizer updates, gradient clipping, etc.)
@@ -19,7 +19,7 @@
 //!     defer vg.deinit();
 //!     // Apply optimizer in the same trace:
 //!     var updated = try params_tree.map2(..., sgd_update);
-//!     return .{ .loss = vg.value, .updated = updated.extract(Params) };
+//!     return .{ .loss = vg.outputs, .updated = updated.extract(Params) };
 //! }
 //! // Trace and compile the whole step as one program:
 //! var program = try zg.trace(train_step, allocator, specs, "train_step");
@@ -38,31 +38,55 @@ const Tensor = @import("tensor.zig");
 
 /// Options for Tensor-level differentiation transforms.
 pub const GradOpts = struct {
+    /// Output leaf whose cotangent is seeded with one.
+    of: OutputSelector = .{ .leafnum = 0 },
+
     /// Zero-based function arguments whose Tensor leaves receive gradients.
     /// One selection preserves that argument's structure. Multiple selections
     ///  return a tuple in this order. Repeated argument numbers remain repeated.
     wrt_argnums: []const usize = &.{0},
 };
 
+/// Select one Tensor leaf from a differentiated function's output tree.
+pub const OutputSelector = union(enum) {
+    /// Dot-separated struct-field and array-index path.
+    path: []const u8,
+    /// Zero-based DFS leaf position.
+    leafnum: usize,
+};
+
 /// Result of a `value_and_grad` call during tracing.
 ///
 /// Use `.grads.extract(SelectedType)` to recover the selected structure, or
-/// `.grads.leaves` for bulk operations like `map2` with an optimizer.
-pub const ValueAndGrad = struct {
-    /// A traced Tensor representing the scalar loss.
-    value: Tensor,
-    /// A `Tree(Tensor)` containing the selected argument gradients.
-    ///  One selection mirrors that argument. Multiple selections form a tuple.
-    grads: Tree(Tensor),
+/// `.grads.leaves` for bulk operations like `map2` with an optimizer. This
+/// value owns the gradient tree's metadata and must be deinitialized.
+pub fn ValueAndGrad(comptime OutputsType: type) type {
+    return struct {
+        /// Every output from the differentiated function.
+        outputs: meta.RuntimeOf(OutputsType),
+        /// Selected argument gradients.
+        grads: Tree(Tensor),
 
-    pub fn deinit(self: *ValueAndGrad) void {
-        self.grads.deinit();
-    }
-};
+        pub fn deinit(self: *@This()) void {
+            self.grads.deinit();
+        }
+    };
+}
 
-/// Trace `func` and compute its return value and selected argument gradients.
+/// Trace `func` and compute its outputs and selected argument gradients.
 ///
 /// Must be called during tracing.
+///
+/// For \(f: X_1 \times \cdots \times X_n \to
+/// Y_1 \times \cdots \times Y_m\), let `opts.of` select a scalar output
+/// \(f_o\), and let \(W = (w_1, \ldots, w_k)\) be `opts.wrt_argnums`. This
+/// returns
+///
+/// $$
+/// \left(f(x),
+/// \left(\nabla_{x_{w_1}}f_o(x), \ldots,
+/// \nabla_{x_{w_k}}f_o(x)\right)\right).
+/// $$
 ///
 /// All Tensor arguments must be bound to a `FunctionBuilder`. Use
 ///  `trace` and explicit compilation operations.
@@ -73,15 +97,15 @@ pub const ValueAndGrad = struct {
 ///  2. Builds a sub-function by tracing `func` with fresh parameters matching
 ///      the input specs.
 ///  3. Applies `pr.ad.vjp_with_value` to produce a VJP function that returns
-///      `[loss_value, grad_0, ..., grad_n]`.
+///      every source output followed by the selected gradients.
 ///  4. Emits a `call` to the VJP function in the *outer* builder with a
 ///      ones-like cotangent seed.
-///  5. Returns the loss `Tensor` and a `Tree(Tensor)` of gradients for the
-///      selected arguments.
+///  5. Reconstructs the source output tree and returns it with a
+///      `Tree(Tensor)` of gradients for the selected arguments.
 ///
 /// ## Constraints
 ///
-///  - `func` must return a single scalar Tensor (the loss).
+///  - `opts.of` must select a scalar Tensor output.
 ///  - `args` must be a nonempty tuple. `opts.wrt_argnums` selects tuple
 ///      elements, and gradients are returned for their Tensor leaves.
 ///
@@ -91,13 +115,20 @@ pub const ValueAndGrad = struct {
 ///     defer vg.deinit();
 ///     var updated = try params_tree.map2(Tensor, &vg.grads, Tensor, lr, sgd_leaf);
 ///     defer updated.deinit();
-///     return .{ .loss = vg.value, .updated = updated.extract(Params) };
+///     return .{ .loss = vg.outputs, .updated = updated.extract(Params) };
 /// }
 /// ```
-pub fn value_and_grad(comptime func: anytype, args: anytype, comptime opts: GradOpts) !ValueAndGrad {
+pub fn value_and_grad(
+    comptime func: anytype,
+    args: anytype,
+    comptime opts: GradOpts,
+) !ValueAndGrad(FunctionOutputType(func)) {
     const ArgsType = @TypeOf(args);
-    const GradsType = selected_grads_type(ArgsType, opts.wrt_argnums);
+    const OutputsType = FunctionOutputType(func);
+    const GradsType = SelectedGradsType(ArgsType, opts.wrt_argnums);
+    const output_leaf_count = comptime Tree(Tensor).leaf_count(OutputsType);
     const grad_leaf_count = comptime Tree(Tensor).leaf_count(GradsType);
+    const selected_output = comptime selected_output_leaf(OutputsType, opts.of);
 
     // Extract builder from first tensor leaf in args.
     const builder = extract_builder(args) orelse @panic("no Tensor found in args");
@@ -117,29 +148,37 @@ pub fn value_and_grad(comptime func: anytype, args: anytype, comptime opts: Grad
         input_vars[i] = try t.get_var();
     }
 
-    // Build sub-function for the loss: create traced params matching the
+    // Build a sub-function: create traced params matching the
     // spec shapes, reconstruct the structured args, and call func.
-    const loss_name = "vg_loss";
-    var loss_builder = try pr.FunctionBuilder.init(program, loss_name);
-    defer loss_builder.deinit();
+    const source_name = "vg_source";
+    var source_builder = try pr.FunctionBuilder.init(program, source_name);
+    defer source_builder.deinit();
 
-    var sub_tree = try args_tree.map(Tensor, &loss_builder, struct {
+    var sub_tree = try args_tree.map(Tensor, &source_builder, struct {
         fn f(b: *pr.FunctionBuilder, spec: Tensor) !Tensor {
             return try Tensor.param(b, spec.dtype, spec.shape.const_slice());
         }
     }.f);
     defer sub_tree.deinit();
 
-    const loss_result: anyerror!Tensor = @call(.auto, func, try sub_tree.extract(ArgsType));
-    const loss_tensor: Tensor = switch (@typeInfo(@TypeOf(loss_result))) {
-        .error_union => try loss_result,
-        else => loss_result,
+    const output_result = @call(.auto, func, try sub_tree.extract(ArgsType));
+    const outputs = switch (@typeInfo(@TypeOf(output_result))) {
+        .error_union => try output_result,
+        else => output_result,
     };
 
-    const loss_var = try loss_tensor.get_var();
-    const loss_func = try loss_builder.finish(&.{loss_var});
+    var output_tree = try Tree(Tensor).from(alloc, outputs);
+    defer output_tree.deinit();
+    const output_vars = try alloc.alloc(*pr.Var, output_leaf_count);
+    defer alloc.free(output_vars);
+    for (output_tree.leaves, output_vars) |tensor, *output_var| {
+        output_var.* = try tensor.get_var();
+    }
+    const selected_var = output_vars[selected_output];
+    if (selected_var.as_tensor().shape.rank() != 0) return error.NonScalarOutput;
+    const source_func = try source_builder.finish(output_vars);
 
-    // Register the loss function in the program. The VJP function replays the forward
+    // Register the source function in the program. The VJP function replays the forward
     //  equations internally (it needs intermediates for the backward pass), so this
     //  function is never called at runtime. We keep it in the program for IR
     //  debuggability (eg MLIR dumps show the clean forward pass as a readable
@@ -148,7 +187,7 @@ pub fn value_and_grad(comptime func: anytype, args: anytype, comptime opts: Grad
     //  its operations.
     const initial_function_count = program.functions.len;
     errdefer program.functions = program.functions[0..initial_function_count];
-    try program.add_function(loss_func);
+    try program.add_function(source_func);
 
     // Request gradients only for the selected argument's leaves.
     //  `wrt` filters the VJP function's output list: cotangents for
@@ -157,15 +196,18 @@ pub fn value_and_grad(comptime func: anytype, args: anytype, comptime opts: Grad
     //  gradients. Any intermediate cotangents that only fed omitted outputs
     //  become dead and are cleaned up by the backend's DCE.
     const wrt_indices = comptime selected_leaf_indices(ArgsType, opts.wrt_argnums);
-    const vjp_name = "vg_loss_vjp";
-    const vjp_func = try ad.vjp_with_value(alloc, program, loss_func, vjp_name, .{ .wrt = &wrt_indices });
+    const vjp_name = "vg_vjp";
+    const vjp_func = try ad.vjp_with_value(alloc, program, source_func, vjp_name, .{
+        .of = &.{selected_output},
+        .wrt = &wrt_indices,
+    });
     try program.add_function(vjp_func);
 
-    // Emit cotangent (ones_like for scalar loss) in the OUTER builder.
-    const cot = try ad.emit_cotangent(builder, loss_var.as_tensor());
+    // Emit a ones-like cotangent for the selected scalar output in the outer builder.
+    const cot = try ad.emit_cotangent(builder, selected_var.as_tensor());
 
     // Call VJP function from outer builder. The VJP takes every primal
-    //  input (not just params) plus the loss cotangent seed.
+    //  input plus the selected output's cotangent seed.
     const total_leaf_count = args_tree.leaves.len;
     const call_args = try alloc.alloc(*pr.Var, total_leaf_count + 1);
     defer alloc.free(call_args);
@@ -173,32 +215,36 @@ pub fn value_and_grad(comptime func: anytype, args: anytype, comptime opts: Grad
     call_args[total_leaf_count] = cot;
 
     const call_outputs = try builder.call(vjp_name, call_args);
-    // vjp_with_value with `wrt` returns the value followed by selected gradients,
-    //  where K == grad_leaf_count.
-    if (call_outputs.len != grad_leaf_count + 1) return error.UnexpectedOutputs;
+    if (call_outputs.len != output_leaf_count + grad_leaf_count) return error.UnexpectedOutputs;
 
-    // Extract value tensor
-    const value_tensor = Tensor.from_var(builder, call_outputs[0]);
+    const output_leaves = try alloc.alloc(Tensor, output_leaf_count);
+    defer alloc.free(output_leaves);
+    for (call_outputs[0..output_leaf_count], output_leaves) |output_var, *tensor| {
+        tensor.* = Tensor.from_var(builder, output_var);
+    }
+    const output_paths = comptime meta.tree_paths(Tensor, OutputsType);
+    var result_tree = try Tree(Tensor).from_slices(alloc, output_leaves, &output_paths);
+    defer result_tree.deinit();
 
     // Extract selected gradients into a Tree.
     const grad_leaves = try alloc.alloc(Tensor, grad_leaf_count);
     defer alloc.free(grad_leaves);
-    for (call_outputs[1..], 0..) |gv, i| {
+    for (call_outputs[output_leaf_count..], 0..) |gv, i| {
         grad_leaves[i] = Tensor.from_var(builder, gv);
     }
 
     const comptime_paths = comptime meta.tree_paths(Tensor, GradsType);
 
     return .{
-        .value = value_tensor,
+        .outputs = try result_tree.extract(OutputsType),
         .grads = try Tree(Tensor).from_slices(alloc, grad_leaves, &comptime_paths),
     };
 }
 
 // Comptime function generators
 //
-// These produce new comptime function pointers from existing functions.
-// The returned functions can be passed to `zg.trace()`.
+// These produce comptime callables from existing functions. The returned
+//  values can be passed to `zg.trace()`.
 //
 // Unlike the trace-time `value_and_grad` above (called inside a traced
 //  function body), these are called at comptime to *generate* a function
@@ -206,108 +252,107 @@ pub fn value_and_grad(comptime func: anytype, args: anytype, comptime opts: Grad
 
 /// Generate a function that computes gradients of `func` for selected arguments.
 ///
-/// Returns a comptime function pointer with the same parameter types as `func`
-///  and gradients populated into the structure described by `GradOpts`.
-///  Pass the returned function to `zg.trace()`.
+/// Returns a comptime callable that accepts `func`'s arguments and produces
+/// gradients with the structure described by `GradOpts`. Pass the returned
+/// callable to `zg.trace()`.
 ///
 /// ```zig
 /// const grad_fn = comptime zg.grad(loss_fn, .{});
 /// var traced = try zg.trace(grad_fn, allocator, specs, "grad_step");
 /// ```
-pub fn make_grad(comptime func: anytype, comptime opts: GradOpts) @TypeOf(&GradCallGen(func, opts).call) {
-    return &GradCallGen(func, opts).call;
+pub fn make_grad(comptime func: anytype, comptime opts: GradOpts) GeneratedCall(.grad, func, opts) {
+    return .{};
 }
 
 /// Generate a function that computes both value and gradients of `func`.
 ///
-/// Returns a comptime function pointer with the same parameter types as `func`.
-///  Its result contains the value and gradients shaped according to `GradOpts`.
+/// Returns a comptime callable that accepts `func`'s arguments. Its result
+/// contains the outputs and gradients shaped according to `GradOpts`.
 ///
 /// ```zig
 /// const vg_fn = comptime zg.value_and_grad(loss_fn, .{});
 /// var traced = try zg.trace(vg_fn, allocator, specs, "vg_step");
 /// ```
-pub fn make_value_and_grad(comptime func: anytype, comptime opts: GradOpts) @TypeOf(&VgCallGen(func, opts).call) {
-    return &VgCallGen(func, opts).call;
+pub fn make_value_and_grad(comptime func: anytype, comptime opts: GradOpts) GeneratedCall(.value_and_grad, func, opts) {
+    return .{};
 }
 
 /// Return type for comptime `value_and_grad` generated functions.
-pub fn ValueAndGradResult(comptime GradsType: type) type {
-    return struct { value: Tensor, grads: GradsType };
+///
+/// Outputs and gradients are reconstructed into their source structures. The
+/// result owns no tree metadata and requires no `deinit` call.
+pub fn ValueAndGradResult(comptime OutputsType: type, comptime GradsType: type) type {
+    return struct { outputs: meta.RuntimeOf(OutputsType), grads: GradsType };
 }
 
-fn GradCallGen(comptime func: anytype, comptime opts: GradOpts) type {
-    const params = @typeInfo(@TypeOf(func)).@"fn".params;
-    const G = selected_grads_type(std.meta.ArgsTuple(@TypeOf(func)), opts.wrt_argnums);
-    return switch (params.len) {
-        1 => struct {
-            pub fn call(a0: params[0].type.?) anyerror!G {
-                return try grad_impl(func, G, .{a0}, opts);
-            }
-        },
-        2 => struct {
-            pub fn call(a0: params[0].type.?, a1: params[1].type.?) anyerror!G {
-                return try grad_impl(func, G, .{ a0, a1 }, opts);
-            }
-        },
-        3 => struct {
-            pub fn call(a0: params[0].type.?, a1: params[1].type.?, a2: params[2].type.?) anyerror!G {
-                return try grad_impl(func, G, .{ a0, a1, a2 }, opts);
-            }
-        },
-        4 => struct {
-            pub fn call(a0: params[0].type.?, a1: params[1].type.?, a2: params[2].type.?, a3: params[3].type.?) anyerror!G {
-                return try grad_impl(func, G, .{ a0, a1, a2, a3 }, opts);
-            }
-        },
-        else => @compileError("grad supports functions with up to 4 parameters"),
+const GeneratedTransform = enum { grad, value_and_grad };
+
+fn GeneratedResult(comptime transform: GeneratedTransform, comptime func: anytype, comptime GradsType: type) type {
+    return switch (transform) {
+        .grad => GradsType,
+        .value_and_grad => ValueAndGradResult(FunctionOutputType(func), GradsType),
     };
 }
 
-fn VgCallGen(comptime func: anytype, comptime opts: GradOpts) type {
-    const params = @typeInfo(@TypeOf(func)).@"fn".params;
-    const G = selected_grads_type(std.meta.ArgsTuple(@TypeOf(func)), opts.wrt_argnums);
-    const R = ValueAndGradResult(G);
-    return switch (params.len) {
-        1 => struct {
-            pub fn call(a0: params[0].type.?) anyerror!R {
-                return try vg_impl(func, G, .{a0}, opts);
-            }
-        },
-        2 => struct {
-            pub fn call(a0: params[0].type.?, a1: params[1].type.?) anyerror!R {
-                return try vg_impl(func, G, .{ a0, a1 }, opts);
-            }
-        },
-        3 => struct {
-            pub fn call(a0: params[0].type.?, a1: params[1].type.?, a2: params[2].type.?) anyerror!R {
-                return try vg_impl(func, G, .{ a0, a1, a2 }, opts);
-            }
-        },
-        4 => struct {
-            pub fn call(a0: params[0].type.?, a1: params[1].type.?, a2: params[2].type.?, a3: params[3].type.?) anyerror!R {
-                return try vg_impl(func, G, .{ a0, a1, a2, a3 }, opts);
-            }
-        },
-        else => @compileError("value_and_grad supports functions with up to 4 parameters"),
+fn GeneratedCall(comptime transform: GeneratedTransform, comptime func: anytype, comptime opts: GradOpts) type {
+    const Args = std.meta.ArgsTuple(@TypeOf(func));
+    const Grads = SelectedGradsType(Args, opts.wrt_argnums);
+    return struct {
+        pub const ArgsType = Args;
+        pub const ResultType = GeneratedResult(transform, func, Grads);
+
+        pub fn call(args: ArgsType) anyerror!ResultType {
+            return try generated_impl(transform, func, Grads, args, opts);
+        }
     };
 }
 
-fn grad_impl(comptime func: anytype, comptime GradsType: type, args: anytype, comptime opts: GradOpts) !GradsType {
+fn generated_impl(
+    comptime transform: GeneratedTransform,
+    comptime func: anytype,
+    comptime GradsType: type,
+    args: anytype,
+    comptime opts: GradOpts,
+) !GeneratedResult(transform, func, GradsType) {
     var vg = try value_and_grad(func, args, opts);
     defer vg.deinit();
-    return try vg.grads.extract(GradsType);
-}
-
-fn vg_impl(comptime func: anytype, comptime GradsType: type, args: anytype, comptime opts: GradOpts) !ValueAndGradResult(GradsType) {
-    var vg = try value_and_grad(func, args, opts);
-    defer vg.deinit();
-    return .{ .value = vg.value, .grads = try vg.grads.extract(GradsType) };
+    return switch (transform) {
+        .grad => try vg.grads.extract(GradsType),
+        .value_and_grad => .{
+            .outputs = vg.outputs,
+            .grads = try vg.grads.extract(GradsType),
+        },
+    };
 }
 
 // Internal helpers
 
-fn selected_grads_type(comptime ArgsType: type, comptime argnums: []const usize) type {
+fn FunctionOutputType(comptime func: anytype) type {
+    const ReturnType = @typeInfo(@TypeOf(func)).@"fn".return_type orelse
+        @compileError("differentiated function must return a value");
+    return switch (@typeInfo(ReturnType)) {
+        .error_union => |info| info.payload,
+        else => ReturnType,
+    };
+}
+
+fn selected_output_leaf(comptime OutputsType: type, comptime selector: OutputSelector) usize {
+    const paths = comptime meta.tree_paths(Tensor, OutputsType);
+    return switch (selector) {
+        .leafnum => |leafnum| if (leafnum < paths.len)
+            leafnum
+        else
+            @compileError("output leaf number is out of range"),
+        .path => |selected_path| {
+            for (paths, 0..) |path, index| {
+                if (std.mem.eql(u8, path, selected_path)) return index;
+            }
+            @compileError("output path does not name a Tensor leaf");
+        },
+    };
+}
+
+fn SelectedGradsType(comptime ArgsType: type, comptime argnums: []const usize) type {
     const info = @typeInfo(ArgsType);
     if (info != .@"struct" or !info.@"struct".is_tuple or info.@"struct".fields.len == 0) {
         @compileError("args must be a tuple with at least one element");
@@ -337,9 +382,9 @@ fn argument_leaf_offset(comptime ArgsType: type, comptime argument: usize) usize
 fn selected_leaf_indices(
     comptime ArgsType: type,
     comptime argnums: []const usize,
-) [Tree(Tensor).leaf_count(selected_grads_type(ArgsType, argnums))]usize {
+) [Tree(Tensor).leaf_count(SelectedGradsType(ArgsType, argnums))]usize {
     const fields = @typeInfo(ArgsType).@"struct".fields;
-    var indices: [Tree(Tensor).leaf_count(selected_grads_type(ArgsType, argnums))]usize = undefined;
+    var indices: [Tree(Tensor).leaf_count(SelectedGradsType(ArgsType, argnums))]usize = undefined;
     var cursor: usize = 0;
     inline for (argnums) |argnum| {
         const offset = comptime argument_leaf_offset(ArgsType, argnum);
@@ -387,6 +432,23 @@ fn test_loss(params: TestParams, batch: TestBatch) !Tensor {
     return try pred.reduce(.{ .axes = &.{ 0, 1 }, .operation = .sum });
 }
 
+const TestOutputs = struct {
+    loss: Tensor,
+    metrics: struct { doubled: Tensor },
+};
+
+fn test_outputs(params: TestParams, batch: TestBatch) !TestOutputs {
+    const loss = try test_loss(params, batch);
+    return .{
+        .loss = loss,
+        .metrics = .{ .doubled = try loss.add(loss) },
+    };
+}
+
+fn five_arg_loss(a: Tensor, b: Tensor, c: Tensor, d: Tensor, e: Tensor) !Tensor {
+    return try (try (try (try a.add(b)).add(c)).add(d)).add(e);
+}
+
 fn unsupported_loss(input: Tensor) !Tensor {
     const builder = switch (input.backing) {
         .traced => |traced| traced.builder,
@@ -406,7 +468,7 @@ test "value_and_grad restores registered functions after failure" {
     defer program.deinit();
     var builder = try pr.FunctionBuilder.init(&program, "outer");
     defer builder.deinit();
-    const input = try Tensor.param(&builder, .f32, &.{4});
+    const input = try Tensor.param(&builder, .f32, &.{});
 
     try std.testing.expectError(error.UnsupportedEqn, value_and_grad(unsupported_loss, .{input}, .{}));
     try std.testing.expectEqual(@as(usize, 0), program.functions.len);
@@ -418,12 +480,9 @@ test make_grad {
     const grad_fn = comptime make_grad(test_loss, .{});
 
     // Verify return type is the params type (TestParams).
-    const RetType = @typeInfo(@TypeOf(grad_fn)).pointer.child;
-    const ret_info = @typeInfo(RetType).@"fn";
-    try std.testing.expectEqual(2, ret_info.params.len);
-
-    const ReturnType = @typeInfo(ret_info.return_type.?).error_union.payload;
-    try std.testing.expect(ReturnType == TestParams);
+    const Callable = @TypeOf(grad_fn);
+    try std.testing.expectEqual(@as(usize, 2), @typeInfo(Callable.ArgsType).@"struct".fields.len);
+    try std.testing.expect(Callable.ResultType == TestParams);
 
     // Trace the generated function into a complete PR program.
     const specs = .{
@@ -446,8 +505,7 @@ test make_grad {
 
 test "make_grad selects differentiated arguments in order" {
     const grad_fn = comptime make_grad(test_loss, .{ .wrt_argnums = &.{ 1, 0, 1 } });
-    const function_type = @typeInfo(@TypeOf(grad_fn)).pointer.child;
-    const return_type = @typeInfo(@typeInfo(function_type).@"fn".return_type.?).error_union.payload;
+    const return_type = @TypeOf(grad_fn).ResultType;
     const return_fields = @typeInfo(return_type).@"struct".fields;
     try std.testing.expectEqual(@as(usize, 3), return_fields.len);
     try std.testing.expect(return_fields[0].type == TestBatch);
@@ -474,14 +532,24 @@ test "make_grad selects differentiated arguments in order" {
     try std.testing.expectEqualSlices(i64, &.{ 3, 4 }, function.returns[3].as_tensor().shape.dims);
 }
 
+test "make_grad has no positional arity ceiling" {
+    const grad_fn = comptime make_grad(five_arg_loss, .{});
+    const scalar = Tensor.abstract(.f32, &.{});
+    const specs = .{ scalar, scalar, scalar, scalar, scalar };
+
+    var program = try trace(grad_fn, std.testing.allocator, specs, "five_arg_grad_test");
+    defer program.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), program.output_arity("five_arg_grad_test"));
+    try std.testing.expectEqual(@as(usize, 5), program.input_arity("five_arg_grad_test"));
+}
+
 test make_value_and_grad {
     const vg_fn = comptime make_value_and_grad(test_loss, .{});
 
-    // Verify return type is ValueAndGradResult(TestParams).
-    const RetType = @typeInfo(@TypeOf(vg_fn)).pointer.child;
-    const ret_info = @typeInfo(RetType).@"fn";
-    const ReturnType = @typeInfo(ret_info.return_type.?).error_union.payload;
-    try std.testing.expect(@hasField(ReturnType, "value"));
+    // Verify return type is ValueAndGradResult(Tensor, TestParams).
+    const ReturnType = @TypeOf(vg_fn).ResultType;
+    try std.testing.expect(@hasField(ReturnType, "outputs"));
     try std.testing.expect(@hasField(ReturnType, "grads"));
 
     const specs = .{
@@ -500,4 +568,29 @@ test make_value_and_grad {
     // value_and_grad returns value (1 tensor) + grads for first arg (2 leaves).
     try std.testing.expectEqual(3, program.output_arity("vg_test"));
     try std.testing.expectEqual(3, program.input_arity("vg_test"));
+}
+
+test "make_value_and_grad preserves structured outputs and selects by path" {
+    const vg_fn = comptime make_value_and_grad(test_outputs, .{
+        .of = .{ .path = "metrics.doubled" },
+    });
+
+    const ReturnType = @TypeOf(vg_fn).ResultType;
+    try std.testing.expect(@TypeOf(@as(ReturnType, undefined).outputs) == TestOutputs);
+
+    const specs = .{
+        TestParams{
+            .w = Tensor.abstract(.f32, &.{ 4, 2 }),
+            .b = Tensor.abstract(.f32, &.{2}),
+        },
+        TestBatch{
+            .x = Tensor.abstract(.f32, &.{ 3, 4 }),
+        },
+    };
+
+    var program = try trace(vg_fn, std.testing.allocator, specs, "structured_vg_test");
+    defer program.deinit();
+
+    try std.testing.expectEqual(@as(usize, 4), program.output_arity("structured_vg_test"));
+    try std.testing.expectEqual(@as(usize, 3), program.input_arity("structured_vg_test"));
 }

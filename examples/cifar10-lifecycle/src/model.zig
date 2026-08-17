@@ -125,7 +125,7 @@ pub fn train_step(params: Params, batch: Batch) !TrainOutput {
     );
     defer updated.deinit();
     return .{
-        .loss_value = value_and_grad.value,
+        .loss_value = value_and_grad.outputs,
         .updated = try updated.extract(Params),
     };
 }

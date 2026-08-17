@@ -310,7 +310,7 @@ pub fn run_train_demo(
             var updated = try params_tree.map2(Tensor, &vg.grads, Tensor, optim, zg.optim.SGD.update);
             defer updated.deinit();
             return .{
-                .loss_val = vg.value,
+                .loss_val = vg.outputs,
                 .updated = try updated.extract(ParamsSpec),
             };
         }

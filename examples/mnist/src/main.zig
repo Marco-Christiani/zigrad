@@ -102,7 +102,7 @@ fn train_step(params: Params, batch: Batch) !struct { loss_val: Tensor, updated:
     defer updated.deinit();
 
     return .{
-        .loss_val = vg.value,
+        .loss_val = vg.outputs,
         .updated = try updated.extract(Params),
     };
 }

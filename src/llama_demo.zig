@@ -76,14 +76,14 @@ fn train_step_fn_mirage(params: LlamaParams, batch: BatchSpec) !TrainStepResult 
     return try sgd_step(params, &vg, 1e-4);
 }
 
-fn sgd_step(params: LlamaParams, vg: *zg.transforms.ValueAndGrad, lr: f32) !TrainStepResult {
+fn sgd_step(params: LlamaParams, vg: *zg.transforms.ValueAndGrad(Tensor), lr: f32) !TrainStepResult {
     var params_tree = try zg.utils.Tree(Tensor).from(vg.grads.allocator, params);
     defer params_tree.deinit();
     const optim = zg.optim.SGD{ .lr = lr };
     var updated = try params_tree.map2(Tensor, &vg.grads, Tensor, optim, zg.optim.SGD.update);
     defer updated.deinit();
     return .{
-        .loss_val = vg.value,
+        .loss_val = vg.outputs,
         .updated = try updated.extract(LlamaParams),
     };
 }

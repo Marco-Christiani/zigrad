@@ -53,10 +53,14 @@ pub fn trace(
     }.f);
 
     const structured = try traced.extract(SpecType);
-    const result_raw = if (@typeInfo(SpecType) == .@"struct" and @typeInfo(SpecType).@"struct".is_tuple)
-        @call(.auto, func, structured)
+    const args = if (@typeInfo(SpecType) == .@"struct" and @typeInfo(SpecType).@"struct".is_tuple)
+        structured
     else
-        @call(.auto, func, .{structured});
+        .{structured};
+    const result_raw = if (comptime is_generated_callable(@TypeOf(func)))
+        @TypeOf(func).call(args)
+    else
+        @call(.auto, func, args);
     const result = switch (@typeInfo(@TypeOf(result_raw))) {
         .error_union => try result_raw,
         else => result_raw,
@@ -74,4 +78,13 @@ pub fn trace(
     try program.add_function(func_pr);
 
     return program;
+}
+
+fn is_generated_callable(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .@"struct" => @hasDecl(T, "ArgsType") and
+            @hasDecl(T, "ResultType") and
+            @hasDecl(T, "call"),
+        else => false,
+    };
 }
