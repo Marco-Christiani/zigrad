@@ -21,6 +21,7 @@ const Writer = std.Io.Writer;
 pub const magic = "ZGPRWIRE";
 /// Current PR wire format version.
 pub const version: u32 = 7;
+const header_size = magic.len + @sizeOf(u32) + @sizeOf(u64);
 
 // This count forces a wire-version decision when `Prim` or `Params` changes.
 const wire_prim_count = 29;
@@ -130,17 +131,52 @@ fn function_ordinal(program: *const pr.Program, id: pr.FunctionId) ?u32 {
     return null;
 }
 
+/// Fixed fields at the start of a PR wire payload.
+pub const Header = struct {
+    /// Raw format marker found in the payload.
+    magic: [magic.len]u8,
+    /// Raw wire-format version found in the payload.
+    version: u32,
+    /// Raw reflected schema fingerprint found in the payload.
+    schema_hash: u64,
+
+    /// Whether the current serializer can decode the payload.
+    pub fn is_supported(self: Header) bool {
+        self.validate() catch return false;
+        return true;
+    }
+
+    pub fn format(self: Header, writer: *Writer) Writer.Error!void {
+        try writer.print("magic={[magic]s} version={[version]d} schema_hash={[schema_hash]d}", self);
+    }
+
+    fn validate(self: Header) error{ InvalidMagic, UnsupportedVersion, SchemaMismatch }!void {
+        if (!std.mem.eql(u8, magic, &self.magic)) return error.InvalidMagic;
+        if (self.version != version) return error.UnsupportedVersion;
+        if (self.schema_hash != schema_hash) return error.SchemaMismatch;
+    }
+};
+
+/// Read a PR wire header without validating.
+pub fn read_header(bytes: []const u8) error{Truncated}!Header {
+    if (bytes.len < header_size) return error.Truncated;
+    var header = Header{
+        .magic = undefined,
+        .version = std.mem.readInt(u32, bytes[magic.len..][0..@sizeOf(u32)], .little),
+        .schema_hash = std.mem.readInt(u64, bytes[magic.len + @sizeOf(u32) ..][0..@sizeOf(u64)], .little),
+    };
+    @memcpy(&header.magic, bytes[0..magic.len]);
+    return header;
+}
+
 /// Parse and validate a complete PR program.
 ///
 /// The returned program copies parsed data into its arena, so the input bytes
 ///  may be released after return.
 pub fn parse(backing_allocator: Allocator, bytes: []const u8) ParseError!pr.Program {
-    var reader = Reader{ .bytes = bytes };
-
-    const found_magic = try reader.take(magic.len);
-    if (!std.mem.eql(u8, magic, found_magic)) return error.InvalidMagic;
-    if (try reader.read_int(u32) != version) return error.UnsupportedVersion;
-    if (try reader.read_int(u64) != schema_hash) return error.SchemaMismatch;
+    const header = try read_header(bytes);
+    try header.validate();
+    var reader = Reader{ .bytes = bytes, .pos = header_size };
 
     var program = pr.Program.init(backing_allocator);
     errdefer program.deinit();
@@ -461,6 +497,20 @@ fn compute_schema_hash() u64 {
     hash_type(&hash, pr.Params);
     hash_type(&hash, pr.Annotation);
     return hash;
+}
+
+test read_header {
+    var bytes: [header_size]u8 = undefined;
+    @memcpy(bytes[0..magic.len], magic);
+    std.mem.writeInt(u32, bytes[magic.len..][0..@sizeOf(u32)], version, .little);
+    std.mem.writeInt(u64, bytes[magic.len + @sizeOf(u32) ..][0..@sizeOf(u64)], schema_hash, .little);
+
+    const header = try read_header(&bytes);
+    try std.testing.expect(header.is_supported());
+    try std.testing.expectError(error.Truncated, read_header(bytes[0 .. bytes.len - 1]));
+
+    bytes[magic.len] +%= 1;
+    try std.testing.expect(!(try read_header(&bytes)).is_supported());
 }
 
 fn hash_type(hash: *u64, comptime T: type) void {

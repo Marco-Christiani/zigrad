@@ -32,42 +32,57 @@ pub fn run(io: std.Io, allocator: Allocator, path: []const u8, action: Action) !
     );
     defer allocator.free(bytes);
 
-    var program = try serialize.parse(allocator, bytes);
-    defer program.deinit();
-
     var stdout_buffer: [8192]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
-    try emit_action(&program, bytes.len, action, &stdout_writer.interface);
-    try stdout_writer.interface.flush();
-}
-
-fn emit_action(
-    program: *const pr.Program,
-    input_size: usize,
-    action: Action,
-    writer: *Writer,
-) !void {
     switch (action) {
-        .render => |format| switch (format) {
-            .zxpr => try zxpr.emit_program(program, writer, .{
-                .spec = .{ .zxpr = .{ .mode = .plain } },
-            }),
-            .json => try json.emit_program(program, writer),
+        .render => |format| {
+            var program = try serialize.parse(allocator, bytes);
+            defer program.deinit();
+            try emit_render(&program, format, &stdout_writer.interface);
         },
         .info => {
-            try writer.print("size: {d} bytes\n", .{input_size});
-            try writer.print("functions: {d}\n", .{program.functions().len});
-            for (program.functions()) |func| {
-                try writer.print(
-                    "function {s}: {d} ops, {d} values\n",
-                    .{ func.name, func.ops.len, func.var_count },
-                );
+            const header = try serialize.read_header(bytes);
+            if (!header.is_supported()) {
+                try emit_info(header, bytes.len, null, &stdout_writer.interface);
+            } else {
+                var program = serialize.parse(allocator, bytes) catch |err| {
+                    try emit_info(header, bytes.len, null, &stdout_writer.interface);
+                    try stdout_writer.interface.print("parse_error: {s}\n", .{@errorName(err)});
+                    try stdout_writer.interface.flush();
+                    return err;
+                };
+                defer program.deinit();
+                try emit_info(header, bytes.len, &program, &stdout_writer.interface);
             }
         },
     }
+    try stdout_writer.interface.flush();
 }
 
-test "emit_action renders ZXPR and JSON" {
+fn emit_render(program: *const pr.Program, format: RenderFormat, writer: *Writer) !void {
+    switch (format) {
+        .zxpr => try zxpr.emit_program(program, writer, .{
+            .spec = .{ .zxpr = .{ .mode = .plain } },
+        }),
+        .json => try json.emit_program(program, writer),
+    }
+}
+
+fn emit_info(header: serialize.Header, input_size: usize, program: ?*const pr.Program, writer: *Writer) !void {
+    try writer.print("wire: {f} supported={}\n", .{ header, header.is_supported() });
+    try writer.print("size: {d} bytes\n", .{input_size});
+    if (program) |parsed| {
+        try writer.print("functions: {d}\n", .{parsed.functions().len});
+        for (parsed.functions()) |func| {
+            try writer.print(
+                "function {s}: {d} ops, {d} values\n",
+                .{ func.name, func.ops.len, func.var_count },
+            );
+        }
+    }
+}
+
+test emit_render {
     var program = pr.Program.init(std.testing.allocator);
     defer program.deinit();
 
@@ -82,7 +97,7 @@ test "emit_action renders ZXPR and JSON" {
     for ([_]RenderFormat{ .zxpr, .json }) |format| {
         var output: Writer.Allocating = .init(std.testing.allocator);
         defer output.deinit();
-        try emit_action(&program, 0, .{ .render = format }, &output.writer);
+        try emit_render(&program, format, &output.writer);
 
         const expected = switch (format) {
             .zxpr => "zxpr @0 main",
@@ -92,7 +107,7 @@ test "emit_action renders ZXPR and JSON" {
     }
 }
 
-test "emit_action reports program contents" {
+test emit_info {
     var program = pr.Program.init(std.testing.allocator);
     defer program.deinit();
 
@@ -102,15 +117,33 @@ test "emit_action reports program contents" {
     const y = try b.add(x, x);
     const func = try b.finish(&.{y});
     _ = try program.add_function(func);
+    const header = serialize.Header{
+        .magic = serialize.magic[0..serialize.magic.len].*,
+        .version = serialize.version,
+        .schema_hash = serialize.schema_hash,
+    };
 
     var output: Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
-    try emit_action(&program, 123, .info, &output.writer);
+    try emit_info(header, 123, &program, &output.writer);
 
-    try std.testing.expectEqualStrings(
-        "size: 123 bytes\n" ++
-            "functions: 1\n" ++
-            "function summary: 1 ops, 2 values\n",
-        output.written(),
-    );
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "wire: magic=ZGPRWIRE") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "size: 123 bytes\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "functions: 1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "function summary: 1 ops, 2 values\n") != null);
+}
+
+test "emit_info reports an unsupported header without a program" {
+    const header = serialize.Header{
+        .magic = serialize.magic[0..serialize.magic.len].*,
+        .version = serialize.version - 1,
+        .schema_hash = serialize.schema_hash,
+    };
+    var output: Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+
+    try emit_info(header, 42, null, &output.writer);
+
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "supported=false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "functions:") == null);
 }
