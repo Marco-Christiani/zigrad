@@ -127,7 +127,8 @@ pub const select = struct {
         try ctx.add_cot(op.operand(2), false_contrib);
     }
 
-    /// JVP: d(select(c, t, f)) = select(c, dt, df)
+    /// JVP: \(\mathrm{d}(\operatorname{select}(c, t, f)) =
+    ///  \operatorname{select}(c, \mathrm{d}t, \mathrm{d}f)\).
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 3) return error.UnsupportedEqn;
 

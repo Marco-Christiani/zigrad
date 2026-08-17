@@ -64,7 +64,8 @@ pub const dot = struct {
         try ctx.add_cot(op.operand(1), rhs_contrib);
     }
 
-    /// JVP: d(dot(a, b)) = dot(da, b) + dot(a, db).
+    /// JVP: \(\mathrm{d}(\operatorname{dot}(a, b)) =
+    ///  \operatorname{dot}(\mathrm{d}a, b) + \operatorname{dot}(a, \mathrm{d}b)\).
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
@@ -482,7 +483,9 @@ pub const dot_general = struct {
         try ctx.add_cot(op.operand(1), rhs_contrib);
     }
 
-    /// JVP: d(dot_general(A, B, p)) = dot_general(dA, B, p) + dot_general(A, dB, p)
+    /// JVP: \(\mathrm{d}(\operatorname{dot\_general}(A, B, p)) =
+    ///  \operatorname{dot\_general}(\mathrm{d}A, B, p) +
+    ///  \operatorname{dot\_general}(A, \mathrm{d}B, p)\).
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, dg_params: pr.DotGeneralParams) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
@@ -613,7 +616,8 @@ fn maybe_general_dot_vjp(
 ///  dimension beyond batch and contracting.
 ///
 /// For lhs cotangent: contracts output cotangent with rhs over the N dim.
-/// For rhs cotangent: contracts lhs^T with output cotangent over the M dim.
+/// For rhs cotangent: contracts \(\mathrm{lhs}^{\mathsf{T}}\) with the output
+/// cotangent over the \(M\) dimension.
 /// Results are transposed from canonical [batch..., free, contracted] order
 ///  back to the original operand dim order via `transpose_to_match`.
 ///

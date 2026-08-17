@@ -69,7 +69,8 @@ pub const reshape = struct {
         try ctx.add_cot(op.operand(0), contrib);
     }
 
-    /// JVP: d(reshape(x, s)) = reshape(dx, s)
+    /// JVP: \(\mathrm{d}(\operatorname{reshape}(x, s)) =
+    ///  \operatorname{reshape}(\mathrm{d}x, s)\).
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: pr.ReshapeParams) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
@@ -200,7 +201,8 @@ pub const transpose = struct {
         try ctx.add_cot(op.operand(0), contrib);
     }
 
-    /// JVP: d(transpose(x, perm)) = transpose(dx, perm)
+    /// JVP: \(\mathrm{d}(\operatorname{transpose}(x, \mathrm{perm})) =
+    ///  \operatorname{transpose}(\mathrm{d}x, \mathrm{perm})\).
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, tp: pr.TransposeParams) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
@@ -245,7 +247,8 @@ pub const slice = struct {
         ctx.set_primal(op.result(0), out);
     }
 
-    /// JVP: d(slice(x, p)) = slice(dx, p)
+    /// JVP: \(\mathrm{d}(\operatorname{slice}(x, p)) =
+    ///  \operatorname{slice}(\mathrm{d}x, p)\).
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, sparams: pr.SliceParams) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
@@ -338,7 +341,8 @@ pub const concatenate = struct {
         ctx.set_primal(op.result(0), out);
     }
 
-    /// JVP: d(concatenate(xs, axis)) = concatenate(dxs, axis)
+    /// JVP: \(\mathrm{d}(\operatorname{concatenate}(x_s, \mathrm{axis})) =
+    ///  \operatorname{concatenate}(\mathrm{d}x_s, \mathrm{axis})\).
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, cp: pr.ConcatenateParams) types.AdError!void {
         if (op.inputs.len == 0) return error.UnsupportedEqn;
 
@@ -582,7 +586,8 @@ pub const gather = struct {
         ctx.set_primal(op.result(0), out);
     }
 
-    /// JVP: d(gather(x, idx, p)) = gather(dx, idx, p)
+    /// JVP: \(\mathrm{d}(\operatorname{gather}(x, \mathrm{idx}, p)) =
+    ///  \operatorname{gather}(\mathrm{d}x, \mathrm{idx}, p)\).
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, gparams: pr.GatherParams) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
@@ -675,7 +680,8 @@ pub const broadcast_in_dim = struct {
         ctx.set_primal(op.result(0), out);
     }
 
-    /// JVP: d(broadcast_in_dim(x, s, bd)) = broadcast_in_dim(dx, s, bd)
+    /// JVP: \(\mathrm{d}(\operatorname{broadcast\_in\_dim}(x, s, \mathrm{bd})) =
+    ///  \operatorname{broadcast\_in\_dim}(\mathrm{d}x, s, \mathrm{bd})\).
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, bp: pr.BroadcastInDimParams) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 

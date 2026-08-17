@@ -61,7 +61,7 @@ pub const add = struct {
         try ctx.add_cot(op.operand(1), out_cot);
     }
 
-    /// JVP: d(x + y) = dx + dy
+    /// JVP: \(\mathrm{d}(x + y) = \mathrm{d}x + \mathrm{d}y\).
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
@@ -106,7 +106,7 @@ pub const subtract = struct {
         try ctx.add_cot(op.operand(1), neg);
     }
 
-    /// JVP: d(x - y) = dx - dy
+    /// JVP: \(\mathrm{d}(x - y) = \mathrm{d}x - \mathrm{d}y\).
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
@@ -154,7 +154,7 @@ pub const multiply = struct {
         try ctx.add_cot(op.operand(1), rhs_contrib);
     }
 
-    /// JVP: d(x * y) = dx * y + x * dy (product rule)
+    /// JVP: \(\mathrm{d}(x y) = (\mathrm{d}x) y + x (\mathrm{d}y)\) (product rule).
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
@@ -193,8 +193,10 @@ pub const divide = struct {
         ctx.set_primal(op.result(0), out);
     }
 
-    /// VJP: d/dlhs(lhs/rhs) = dout/rhs, d/drhs(lhs/rhs) = -dout*lhs/rhs^2
-    /// (quotient rule).
+    /// VJP: \(\mathrm{d}_{\mathrm{lhs}}(\mathrm{lhs}/\mathrm{rhs}) =
+    ///  \frac{\mathrm{dout}}{\mathrm{rhs}}\) and
+    /// \(\mathrm{d}_{\mathrm{rhs}}(\mathrm{lhs}/\mathrm{rhs}) =
+    ///  -\frac{\mathrm{dout}\,\mathrm{lhs}}{\mathrm{rhs}^2}\) (quotient rule).
     pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
@@ -215,7 +217,8 @@ pub const divide = struct {
         try ctx.add_cot(op.operand(1), neg);
     }
 
-    /// JVP: d(x/y) = dx/y - x*dy/y^2 (quotient rule)
+    /// JVP: \(\mathrm{d}(x/y) = \frac{\mathrm{d}x}{y} -
+    ///  \frac{x\,\mathrm{d}y}{y^2}\) (quotient rule).
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 

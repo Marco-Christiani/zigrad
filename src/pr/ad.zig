@@ -178,12 +178,15 @@ fn ad_impl(
     return try b.finish(returns);
 }
 
-/// Reverse-mode AD (pullback): transforms \(f: M -> N\) into
-///  \(vjp_f: (T_xM, T*_{f(x)}N) -> T*_xM \)
+/// Reverse-mode AD (pullback) transforms \(f: M \to N\) into:
 ///
-/// Concretely, computes the transpose-Jacobian product \(J^T(x) * v\) for a
-///  cotangent seed \(v\), which is the pullback \(f*: T*_{f(x)}N -> T*_xM\)
-///  evaluated at \(x\).
+/// $$
+/// \operatorname{vjp}_f: (T_x M, T^*_{f(x)} N) \to T^*_x M
+/// $$
+///
+/// For a cotangent seed \(v\), it computes the transpose-Jacobian product
+/// \(J^\mathsf{T}(x) \cdot v\), the pullback
+/// \(f^*: T^*_{f(x)} N \to T^*_x M\) evaluated at \(x\).
 ///
 /// The returned `pr.Function` takes \(N\) primal inputs followed by \(M\) output
 ///  cotangent seeds, and returns \(N\) input cotangent vectors. In the
@@ -205,8 +208,9 @@ pub fn vjp(
 
 /// Apply VJP and emit primal outputs before input cotangents.
 ///
-/// `(N primals, M cotangent seeds) -> (M primal outputs, K input cotangents)`
-///  where `K = opts.wrt.?.len` if provided, else `N`.
+/// Takes \(N\) primal inputs and \(M\) cotangent seeds, then returns \(M\)
+/// primal outputs and \(K\) input cotangents. Here \(K\) is
+/// `opts.wrt.?.len` when provided, otherwise \(N\).
 ///
 /// See `vjp`
 pub fn vjp_with_value(
@@ -219,22 +223,27 @@ pub fn vjp_with_value(
     return try ad_impl(.vjp, allocator, program, func, name, .emit, opts.wrt);
 }
 
-/// Forward-mode AD (pushforward / differential): transforms `f: M -> N` into
-///  `jvp_f: (T_xM, T_xM) -> T_{f(x)}N`.
+/// Forward-mode AD (pushforward / differential) transforms \(f: M \to N\) into:
 ///
-/// Concretely, computes the Jacobian-vector product J(x) * v for a tangent seed
-///  `v`, which is the differential `df_x: T_xM -> T_{f(x)}N` applied to `v`.
+/// $$
+/// \operatorname{jvp}_f: (T_x M, T_x M) \to T_{f(x)} N
+/// $$
 ///
-/// The returned function takes `N` primal inputs followed by `N` input tangent
-///  vectors (same shapes), and returns `M` output tangent vectors matching the
-///  original function's output shapes.
+/// For a tangent seed \(v\), it computes the Jacobian-vector product
+/// \(J(x) \cdot v\), the differential
+/// \(\mathrm{d}f_x: T_x M \to T_{f(x)} N\) applied to \(v\).
+///
+/// The returned function takes \(N\) primal inputs followed by \(N\) input
+/// tangent vectors of the same shapes, and returns \(M\) output tangent vectors
+/// matching the original function's output shapes.
 pub fn jvp(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) JvpError!pr.Function {
     return try ad_impl(.jvp, allocator, program, func, name, .skip, null);
 }
 
 /// Apply JVP and emit primal outputs before output tangents.
 ///
-/// `(N primals, N tangents) -> (M primal outputs, M output tangents)`.
+/// Takes \(N\) primal inputs and \(N\) tangents, then returns \(M\) primal
+/// outputs and \(M\) output tangents.
 ///
 /// See `jvp`
 pub fn jvp_with_value(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) JvpError!pr.Function {

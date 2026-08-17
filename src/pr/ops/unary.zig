@@ -55,7 +55,7 @@ pub const exp = struct {
         try ctx.add_cot(op.operand(0), contrib);
     }
 
-    /// JVP: d(exp(x)) = exp(x) * dx
+    /// JVP: \(\mathrm{d}(\exp(x)) = \exp(x)\,\mathrm{d}x\).
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
@@ -97,7 +97,7 @@ pub const log = struct {
         try ctx.add_cot(op.operand(0), contrib);
     }
 
-    /// JVP: d(log(x)) = dx / x
+    /// JVP: \(\mathrm{d}(\log(x)) = \mathrm{d}x / x\).
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
@@ -150,7 +150,8 @@ pub const convert = struct {
         try ctx.add_cot(op.operand(0), cot);
     }
 
-    /// JVP: d(convert(x, T)) = convert(dx, T)
+    /// JVP: \(\mathrm{d}(\operatorname{convert}(x, T)) =
+    ///  \operatorname{convert}(\mathrm{d}x, T)\).
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, out_dtype: pr.DType) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
@@ -182,8 +183,10 @@ pub const rsqrt = struct {
         ctx.set_primal(op.result(0), out);
     }
 
-    /// VJP: d/dx rsqrt(x) = -0.5 * rsqrt(x)^3.
-    /// Uses the forward output (y = rsqrt(x)) directly: scale = y^3 * (-0.5).
+    /// VJP: \(\mathrm{d}(\operatorname{rsqrt}(x)) =
+    ///  -0.5\,\operatorname{rsqrt}(x)^3\,\mathrm{d}x\).
+    /// Uses the forward output \(y = \operatorname{rsqrt}(x)\) directly:
+    /// \(\mathrm{scale} = -0.5\,y^3\).
     pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
@@ -201,7 +204,8 @@ pub const rsqrt = struct {
         try ctx.add_cot(op.operand(0), contrib);
     }
 
-    /// JVP: d(rsqrt(x)) = -0.5 * rsqrt(x)^3 * dx
+    /// JVP: \(\mathrm{d}(\operatorname{rsqrt}(x)) =
+    ///  -0.5\,\operatorname{rsqrt}(x)^3\,\mathrm{d}x\).
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
@@ -240,7 +244,8 @@ pub const logistic = struct {
         ctx.set_primal(op.result(0), out);
     }
 
-    /// VJP: d/dx sigmoid(x) = sigmoid(x) * (1 - sigmoid(x)).
+    /// VJP: \(\mathrm{d}(\operatorname{sigmoid}(x)) =
+    ///  \operatorname{sigmoid}(x)(1 - \operatorname{sigmoid}(x))\,\mathrm{d}x\).
     /// Uses the forward output directly to avoid recomputing the sigmoid.
     pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
@@ -258,7 +263,8 @@ pub const logistic = struct {
         try ctx.add_cot(op.operand(0), contrib);
     }
 
-    /// JVP: d(sigmoid(x)) = sigmoid(x) * (1 - sigmoid(x)) * dx
+    /// JVP: \(\mathrm{d}(\operatorname{sigmoid}(x)) =
+    ///  \operatorname{sigmoid}(x)(1 - \operatorname{sigmoid}(x))\,\mathrm{d}x\).
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
