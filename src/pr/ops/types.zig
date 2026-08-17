@@ -69,6 +69,10 @@ pub const AdError = pr.BuildError || error{
     UnsupportedDType,
     /// An index in `VjpOpts.wrt` is out of range for the source function.
     WrtIndexOutOfRange,
+    /// An index in `VjpOpts.of` is out of range for the source function.
+    OfIndexOutOfRange,
+    /// `VjpOpts.of` provides no output cotangent seeds.
+    EmptyOutputSelection,
     /// A harvested input has no cotangent, or a harvested output has no tangent.
     ///
     /// This usually means a primal-chain op lacks its mode-specific propagation

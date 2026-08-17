@@ -10,11 +10,17 @@ const ops = @import("ops/ops.zig");
 
 const log = std.log.scoped(.@"zg/ad");
 
-pub const VjpError = ops.types.AdError;
-pub const JvpError = ops.types.AdError;
+pub const AdError = ops.types.AdError;
 
 /// Options for `vjp` and `vjp_with_value`.
 pub const VjpOpts = struct {
+    /// Select source-function outputs whose cotangents seed the VJP.
+    ///
+    /// `null` selects every output. A provided slice must be nonempty. The
+    ///  transformed function accepts seeds in this slice's order. Duplicate
+    ///  indices contribute independent seeds to the same output cotangent.
+    of: ?[]const usize = null,
+
     /// Select primal-input cotangents returned by the transformed function.
     ///
     /// `null` selects every input. The output order matches this slice, including
@@ -47,12 +53,13 @@ fn is_differentiable_dtype(dtype: pr.DType) bool {
 ///  input cotangents. JVP seeds input tangents, traverses operations forward,
 ///  and harvests output tangents.
 ///
-/// `wrt` restricts the harvested values. Traversal still covers every operation
-///  so a later dead-code elimination pass can remove work for omitted results.
+/// `of` restricts VJP seeds and `wrt` restricts harvested values. The transform
+///  replays every primal op regardless so removing unused replayed ops requires
+///  a DCE pass in the compilation pipeline or similar processing.
 ///
-/// Missing rules on active differentiable paths return `error.UnsupportedEqn`.
+/// Missing rules on active differentiable paths return `AdError.UnsupportedEqn`.
 /// Missing duals for non-differentiable dtypes become zero tensors. A missing
-///  dual for a differentiable dtype returns `error.MissingDual`.
+///  dual for a differentiable dtype returns `AdError.MissingDual`.
 /// TODO(ad): Make the built-in differentiable dtype set an explicit AD policy.
 fn ad_impl(
     comptime mode: Mode,
@@ -62,7 +69,8 @@ fn ad_impl(
     name: []const u8,
     primals: PrimalOutputs,
     wrt: ?[]const usize,
-) ops.types.AdError!pr.Function {
+    of: ?[]const usize,
+) AdError!pr.Function {
     var primal_map = try allocator.alloc(?*pr.Var, func.var_count);
     defer allocator.free(primal_map);
     @memset(primal_map, null);
@@ -80,19 +88,36 @@ fn ad_impl(
         primal_map[param_var.id] = new_param;
     }
 
-    // VJP seeds output cotangents. JVP seeds input tangents.
-    const seed_vars = switch (mode) {
-        .vjp => func.returns,
-        .jvp => func.params,
+    if (mode == .vjp) {
+        if (of) |indices| {
+            if (indices.len == 0) return AdError.EmptyOutputSelection;
+            for (indices) |idx| {
+                if (idx >= func.returns.len) return AdError.OfIndexOutOfRange;
+            }
+        }
+    }
+
+    // VJP seeds selected output cotangents. JVP seeds every input tangent.
+    const num_seeds = switch (mode) {
+        .vjp => if (of) |indices| indices.len else func.returns.len,
+        .jvp => func.params.len,
     };
-    for (seed_vars) |v| {
+    for (0..num_seeds) |i| {
+        const v = switch (mode) {
+            .vjp => if (of) |indices| func.returns[indices[i]] else func.returns[i],
+            .jvp => func.params[i],
+        };
         const tensor = v.aval.as_tensor();
         if (mode == .vjp) {
-            if (tensor.dtype != .f32 and tensor.dtype != .f64 and tensor.dtype != .bf16)
-                return error.UnsupportedDType;
+            if (!is_differentiable_dtype(tensor.dtype))
+                return AdError.UnsupportedDType;
         }
         const new_seed = try b.param_tensor(tensor.dtype, tensor.shape.dims);
-        dual_map[v.id] = new_seed;
+        if (mode == .vjp and dual_map[v.id] != null) {
+            dual_map[v.id] = try b.add(dual_map[v.id].?, new_seed);
+        } else {
+            dual_map[v.id] = new_seed;
+        }
     }
 
     const ad_ctx = ops.types.AdContext{
@@ -131,7 +156,7 @@ fn ad_impl(
     };
     if (wrt) |indices| {
         for (indices) |idx| {
-            if (idx >= all_harvest_vars.len) return error.WrtIndexOutOfRange;
+            if (idx >= all_harvest_vars.len) return AdError.WrtIndexOutOfRange;
         }
     }
     const num_harvest: usize = if (wrt) |indices| indices.len else all_harvest_vars.len;
@@ -146,7 +171,7 @@ fn ad_impl(
     var out_idx: usize = 0;
     if (primals == .emit) {
         for (func.returns) |ret_var| {
-            returns[out_idx] = primal_map[ret_var.id] orelse return error.UnsupportedEqn;
+            returns[out_idx] = primal_map[ret_var.id] orelse return AdError.UnsupportedEqn;
             out_idx += 1;
         }
     }
@@ -167,7 +192,7 @@ fn ad_impl(
                         if (mode == .vjp) "vjp" else "jvp",
                     },
                 );
-                return error.MissingDual;
+                return AdError.MissingDual;
             }
             // Integer inputs use zero duals to preserve result arity.
             returns[out_idx] = try b.scalar_broadcast(t.dtype, t.shape.dims, 0.0);
@@ -178,18 +203,38 @@ fn ad_impl(
     return try b.finish(returns);
 }
 
-/// Reverse-mode AD (pullback) transforms \(f: M \to N\) into:
+/// Reverse-mode AD applies the pullback of \(f: M \to N\):
 ///
 /// $$
-/// \operatorname{vjp}_f: (T_x M, T^*_{f(x)} N) \to T^*_x M
+/// \operatorname{vjp}_f:
+/// (x, v) \in M \times T^*_{f(x)}N
+/// \mapsto \mathrm{d}f_x^*(v) \in T_x^*M.
 /// $$
 ///
 /// For a cotangent seed \(v\), it computes the transpose-Jacobian product
 /// \(J^\mathsf{T}(x) \cdot v\), the pullback
 /// \(f^*: T^*_{f(x)} N \to T^*_x M\) evaluated at \(x\).
 ///
-/// The returned `pr.Function` takes \(N\) primal inputs followed by \(M\) output
-///  cotangent seeds, and returns \(N\) input cotangent vectors. In the
+/// For
+///
+/// $$
+/// f: X_1 \times \cdots \times X_n \to Y_1 \times \cdots \times Y_m,
+/// $$
+///
+/// let \(O = (o_1, \ldots, o_s)\) be `opts.of` and
+/// \(W = (w_1, \ldots, w_k)\) be `opts.wrt`. The transformed function has
+/// signature
+///
+/// $$
+/// \operatorname{vjp}^{O,W}_f:
+/// (X_1 \times \cdots \times X_n)
+/// \times (T^*_{f_{o_1}(x)}Y_{o_1} \times \cdots
+/// \times T^*_{f_{o_s}(x)}Y_{o_s})
+/// \to T^*_{x_{w_1}}X_{w_1} \times \cdots
+/// \times T^*_{x_{w_k}}X_{w_k}.
+/// $$
+///
+/// `null` expands \(O\) or \(W\) to every corresponding index. In the
 ///  Euclidean or Cartesian case (\(G = I\)), these equal gradients. In general,
 ///  they are covectors and must be raised with \(G^{-1}\) to obtain gradient
 ///  tangent vectors.
@@ -198,19 +243,22 @@ pub fn vjp(
     program: *pr.Program,
     func: pr.Function,
     name: []const u8,
-    /// See `VjpOpts` for how `opts.wrt` restricts which parameter cotangents
-    ///  appear in the returned function's outputs. Default `.{}` harvests all
-    ///  parameter cotangents.
+    /// See `VjpOpts` for seed and result selection. Default `.{}` seeds every
+    ///  source output and returns every parameter cotangent.
     opts: VjpOpts,
-) VjpError!pr.Function {
-    return try ad_impl(.vjp, allocator, program, func, name, .skip, opts.wrt);
+) AdError!pr.Function {
+    return try ad_impl(.vjp, allocator, program, func, name, .skip, opts.wrt, opts.of);
 }
 
 /// Apply VJP and emit primal outputs before input cotangents.
 ///
-/// Takes \(N\) primal inputs and \(M\) cotangent seeds, then returns \(M\)
-/// primal outputs and \(K\) input cotangents. Here \(K\) is
-/// `opts.wrt.?.len` when provided, otherwise \(N\).
+/// Using the notation from `vjp`, this changes the codomain to
+///
+/// $$
+/// (Y_1 \times \cdots \times Y_m)
+/// \times (T^*_{x_{w_1}}X_{w_1} \times \cdots
+/// \times T^*_{x_{w_k}}X_{w_k}).
+/// $$
 ///
 /// See `vjp`
 pub fn vjp_with_value(
@@ -219,35 +267,52 @@ pub fn vjp_with_value(
     func: pr.Function,
     name: []const u8,
     opts: VjpOpts,
-) VjpError!pr.Function {
-    return try ad_impl(.vjp, allocator, program, func, name, .emit, opts.wrt);
+) AdError!pr.Function {
+    return try ad_impl(.vjp, allocator, program, func, name, .emit, opts.wrt, opts.of);
 }
 
-/// Forward-mode AD (pushforward / differential) transforms \(f: M \to N\) into:
+/// Forward-mode AD applies the differential of \(f: M \to N\):
 ///
 /// $$
-/// \operatorname{jvp}_f: (T_x M, T_x M) \to T_{f(x)} N
+/// \operatorname{jvp}_f:
+/// (x, v) \in M \times T_xM
+/// \mapsto \mathrm{d}f_x(v) \in T_{f(x)}N.
 /// $$
 ///
 /// For a tangent seed \(v\), it computes the Jacobian-vector product
 /// \(J(x) \cdot v\), the differential
 /// \(\mathrm{d}f_x: T_x M \to T_{f(x)} N\) applied to \(v\).
 ///
-/// The returned function takes \(N\) primal inputs followed by \(N\) input
-/// tangent vectors of the same shapes, and returns \(M\) output tangent vectors
-/// matching the original function's output shapes.
-pub fn jvp(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) JvpError!pr.Function {
-    return try ad_impl(.jvp, allocator, program, func, name, .skip, null);
+/// For
+///
+/// $$
+/// f: X_1 \times \cdots \times X_n \to Y_1 \times \cdots \times Y_m,
+/// $$
+///
+/// the transformed function has signature
+///
+/// $$
+/// \operatorname{jvp}_f:
+/// (X_1 \times \cdots \times X_n)
+/// \times (T_{x_1}X_1 \times \cdots \times T_{x_n}X_n)
+/// \to T_{f_1(x)}Y_1 \times \cdots \times T_{f_m(x)}Y_m.
+/// $$
+pub fn jvp(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) AdError!pr.Function {
+    return try ad_impl(.jvp, allocator, program, func, name, .skip, null, null);
 }
 
 /// Apply JVP and emit primal outputs before output tangents.
 ///
-/// Takes \(N\) primal inputs and \(N\) tangents, then returns \(M\) primal
-/// outputs and \(M\) output tangents.
+/// Using the notation from `jvp`, this changes the codomain to
+///
+/// $$
+/// (Y_1 \times \cdots \times Y_m)
+/// \times (T_{f_1(x)}Y_1 \times \cdots \times T_{f_m(x)}Y_m).
+/// $$
 ///
 /// See `jvp`
-pub fn jvp_with_value(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) JvpError!pr.Function {
-    return try ad_impl(.jvp, allocator, program, func, name, .emit, null);
+pub fn jvp_with_value(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) AdError!pr.Function {
+    return try ad_impl(.jvp, allocator, program, func, name, .emit, null, null);
 }
 
 /// Emit a ones-like cotangent for VJP seeding.
@@ -288,6 +353,75 @@ test "vjp produces gradients matching input shapes" {
         try std.testing.expectEqual(p_t.dtype, g_t.dtype);
         try std.testing.expect(std.mem.eql(i64, p_t.shape.dims, g_t.shape.dims));
     }
+}
+
+test "vjp selects output cotangent seeds" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    const x = try b.param_tensor(.f32, &.{});
+    const square = try b.multiply(x, x);
+    const double = try b.add(x, x);
+    const func = try b.finish(&.{ square, double });
+    try program.add_function(func);
+
+    const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp", .{
+        .of = &.{1},
+    });
+    try pr.validate_ops_in_func(vjp_func);
+
+    try std.testing.expectEqual(@as(usize, 2), vjp_func.params.len);
+    try std.testing.expectEqual(@as(usize, 1), vjp_func.returns.len);
+    const grad_op = vjp_func.returns[0].defining_op.?;
+    try std.testing.expectEqual(pr.Prim.add, grad_op.prim());
+    try std.testing.expectEqual(vjp_func.params[1], grad_op.operand(0));
+    try std.testing.expectEqual(vjp_func.params[1], grad_op.operand(1));
+}
+
+test "vjp accumulates duplicate output seeds" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    const x = try b.param_tensor(.f32, &.{});
+    const y = try b.multiply(x, x);
+    const func = try b.finish(&.{y});
+    try program.add_function(func);
+
+    const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp", .{
+        .of = &.{ 0, 0 },
+    });
+    try pr.validate_ops_in_func(vjp_func);
+
+    try std.testing.expectEqual(@as(usize, 3), vjp_func.params.len);
+    try std.testing.expectEqual(@as(usize, 1), vjp_func.returns.len);
+}
+
+test "vjp rejects invalid output selection" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    const x = try b.param_tensor(.f32, &.{});
+    const y = try b.multiply(x, x);
+    const func = try b.finish(&.{y});
+    try program.add_function(func);
+
+    try std.testing.expectError(
+        error.EmptyOutputSelection,
+        vjp(std.testing.allocator, &program, func, "empty", .{ .of = &.{} }),
+    );
+    try std.testing.expectError(
+        error.OfIndexOutOfRange,
+        vjp(std.testing.allocator, &program, func, "out_of_range", .{ .of = &.{1} }),
+    );
 }
 
 test "vjp_with_value returns primals plus gradients" {

@@ -15,7 +15,7 @@ pub const GradCheckOpts = struct {
     tolerance: f32 = 1e-2,
 };
 
-pub const GradCheckError = pr_eval.EvalError || ad.VjpError || error{GradientMismatch};
+pub const GradCheckError = pr_eval.EvalError || ad.AdError || error{GradientMismatch};
 
 /// Verify that analytic gradients (VJP) match numeric gradients (finite differences).
 ///
