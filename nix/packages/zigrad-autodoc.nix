@@ -3,6 +3,7 @@
   lib,
   stdenvNoCC,
   zig,
+  zigAutodocDocs,
   zigradSrc,
 }: let
   zigDeps = callPackage ./zig-dependencies.nix {
@@ -20,6 +21,7 @@ in
     configurePhase = ''
       runHook preConfigure
       export ZIG_GLOBAL_CACHE_DIR=$(mktemp -d)
+      export ZIG_LIB_DIR=${zigAutodocDocs}
       runHook postConfigure
     '';
 

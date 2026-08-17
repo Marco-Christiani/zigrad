@@ -50,8 +50,10 @@ in {
       root = repoRoot;
     };
 
+    zigradAutodocDocs = pkgs.callPackage ../packages/zig-autodoc-docs.nix {};
     zigradAutodoc = pkgs.callPackage ../packages/zigrad-autodoc.nix {
-      inherit zigradSrc;
+      zigAutodocDocs = zigradAutodocDocs;
+      zigradSrc = zigradSrc;
     };
     zigradAutodocCandidate = pkgs.callPackage ../packages/zigrad-autodoc-bundle.nix {
       inherit zigradAutodoc;

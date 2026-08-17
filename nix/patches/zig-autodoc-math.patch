@@ -1,0 +1,121 @@
+diff --git a/wasm/markdown/Document.zig b/wasm/markdown/Document.zig
+--- a/wasm/markdown/Document.zig
++++ b/wasm/markdown/Document.zig
+@@ -62,6 +62,10 @@
+         /// Data is `text`.
+         code_span,
+         /// Data is `text`.
++        math_inline,
++        /// Data is `text`.
++        math_display,
++        /// Data is `text`.
+         text,
+         /// Data is `none`.
+         line_break,
+diff --git a/wasm/markdown/Parser.zig b/wasm/markdown/Parser.zig
+--- a/wasm/markdown/Parser.zig
++++ b/wasm/markdown/Parser.zig
+@@ -984,7 +984,12 @@
+     fn parse(ip: *InlineParser) Allocator.Error!ExtraIndex {
+         while (ip.pos < ip.content.len) : (ip.pos += 1) {
+             switch (ip.content[ip.pos]) {
+-                '\\' => ip.pos += 1,
++                '\\' => if (ip.pos + 1 < ip.content.len and ip.content[ip.pos + 1] == '(') {
++                    try ip.parseMathEscaped();
++                } else {
++                    ip.pos += 1;
++                },
++                '$' => try ip.parseMathDollar(),
+                 '[' => try ip.pending_inlines.append(ip.parent.allocator, .{
+                     .tag = .link,
+                     .data = .{ .none = {} },
+@@ -1425,6 +1429,56 @@
+         ip.pos -= 1;
+     }
+
++    fn parseMathEscaped(ip: *InlineParser) !void {
++        const opener_start = ip.pos;
++        const content_start = opener_start + 2;
++        const closer_start = mem.indexOfPos(u8, ip.content, content_start, "\\)") orelse return;
++        try ip.addMath(opener_start, content_start, closer_start, closer_start + 2, .math_inline);
++    }
++
++    fn parseMathDollar(ip: *InlineParser) !void {
++        const opener_start = ip.pos;
++        const display = ip.pos + 1 < ip.content.len and ip.content[ip.pos + 1] == '$';
++        const opener_len: usize = if (display) 2 else 1;
++        const content_start = opener_start + opener_len;
++
++        var search_start = content_start;
++        while (mem.indexOfScalarPos(u8, ip.content, search_start, '$')) |closer_start| {
++            if (display) {
++                if (closer_start + 1 < ip.content.len and ip.content[closer_start + 1] == '$') {
++                    try ip.addMath(opener_start, content_start, closer_start, closer_start + 2, .math_display);
++                    return;
++                }
++            } else if (closer_start == 0 or ip.content[closer_start - 1] != '\\') {
++                try ip.addMath(opener_start, content_start, closer_start, closer_start + 1, .math_inline);
++                return;
++            }
++            search_start = closer_start + 1;
++        }
++    }
++
++    fn addMath(
++        ip: *InlineParser,
++        opener_start: usize,
++        content_start: usize,
++        closer_start: usize,
++        closer_end: usize,
++        tag: Node.Tag,
++    ) !void {
++        const math = try ip.parent.addNode(.{
++            .tag = tag,
++            .data = .{ .text = .{
++                .content = try ip.parent.addString(ip.content[content_start..closer_start]),
++            } },
++        });
++        try ip.completed_inlines.append(ip.parent.allocator, .{
++            .node = math,
++            .start = opener_start,
++            .len = closer_end - opener_start,
++        });
++        ip.pos = closer_end - 1;
++    }
++
+     /// Encodes children parsed in the content range `start..end`. The children
+     /// will be text nodes and any completed inlines within the range.
+     fn encodeChildren(ip: *InlineParser, start: usize, end: usize) !ExtraIndex {
+diff --git a/wasm/markdown/renderer.zig b/wasm/markdown/renderer.zig
+--- a/wasm/markdown/renderer.zig
++++ b/wasm/markdown/renderer.zig
+@@ -172,6 +172,14 @@
+                     const content = doc.string(data.text.content);
+                     try writer.print("<code>{f}</code>", .{fmtHtml(content)});
+                 },
++                .math_inline => {
++                    const content = doc.string(data.text.content);
++                    try writer.print("\\({f}\\)", .{fmtHtml(content)});
++                },
++                .math_display => {
++                    const content = doc.string(data.text.content);
++                    try writer.print("$$ {f} $$", .{fmtHtml(content)});
++                },
+                 .text => {
+                     const content = doc.string(data.text.content);
+                     try writer.print("{f}", .{fmtHtml(content)});
+@@ -225,6 +233,14 @@ pub fn renderInlineNodeText(
+             const content = doc.string(data.text.content);
+             try writer.print("{f}", .{fmtHtml(content)});
+         },
++        .math_inline => {
++            const content = doc.string(data.text.content);
++            try writer.print("\\({f}\\)", .{fmtHtml(content)});
++        },
++        .math_display => {
++            const content = doc.string(data.text.content);
++            try writer.print("$$ {f} $$", .{fmtHtml(content)});
++        },
+         .line_break => {
+             try writer.writeAll("\n");
+         },
