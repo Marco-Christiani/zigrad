@@ -1,0 +1,27 @@
+diff --git a/wasm/Walk.zig b/wasm/Walk.zig
+--- a/wasm/Walk.zig
++++ b/wasm/Walk.zig
+@@ -154,0 +154,10 @@
++        // Keep feature-gated imported namespaces traversable in autodoc.
++        fn is_empty_namespace(file_index: File.Index, category: Category) bool {
++            const node = switch (category) {
++                .namespace => |node| node,
++                else => return false,
++            };
++            var buf: [2]Ast.Node.Index = undefined;
++            const container_decl = file_index.get_ast().fullContainerDecl(&buf, node) orelse return false;
++            return container_decl.ast.members.len == 0;
++        }
+@@ -253,2 +263,10 @@
+-                        const then_cat = categorize_expr_deep(file_index, if_full.ast.then_expr);
+-                        const else_cat = categorize_expr_deep(file_index, else_expr);
++                        const then_raw = categorize_expr(file_index, if_full.ast.then_expr);
++                        const else_raw = categorize_expr(file_index, else_expr);
++                        // Preserve the imported branch when the fallback is empty.
++                        if (then_raw == .alias and is_empty_namespace(file_index, else_raw))
++                            return then_raw;
++                        if (else_raw == .alias and is_empty_namespace(file_index, then_raw))
++                            return else_raw;
++
++                        const then_cat = categorize_expr_deep(file_index, if_full.ast.then_expr);
++                        const else_cat = categorize_expr_deep(file_index, else_expr);

@@ -29,11 +29,12 @@ diff --git a/wasm/markdown/Parser.zig b/wasm/markdown/Parser.zig
                  '[' => try ip.pending_inlines.append(ip.parent.allocator, .{
                      .tag = .link,
                      .data = .{ .none = {} },
-@@ -1425,6 +1429,56 @@
+@@ -1425,6 +1429,59 @@
          ip.pos -= 1;
      }
 
 +    fn parseMathEscaped(ip: *InlineParser) !void {
++        // Preserve escaped TeX delimiters for client-side math rendering.
 +        const opener_start = ip.pos;
 +        const content_start = opener_start + 2;
 +        const closer_start = mem.indexOfPos(u8, ip.content, content_start, "\\)") orelse return;
@@ -41,6 +42,7 @@ diff --git a/wasm/markdown/Parser.zig b/wasm/markdown/Parser.zig
 +    }
 +
 +    fn parseMathDollar(ip: *InlineParser) !void {
++        // Accept single-dollar inline and double-dollar display math spans.
 +        const opener_start = ip.pos;
 +        const display = ip.pos + 1 < ip.content.len and ip.content[ip.pos + 1] == '$';
 +        const opener_len: usize = if (display) 2 else 1;
@@ -61,6 +63,7 @@ diff --git a/wasm/markdown/Parser.zig b/wasm/markdown/Parser.zig
 +        }
 +    }
 +
++    // Store the math body without delimiters so each renderer can emit its syntax.
 +    fn addMath(
 +        ip: *InlineParser,
 +        opener_start: usize,
@@ -104,7 +107,8 @@ diff --git a/wasm/markdown/renderer.zig b/wasm/markdown/renderer.zig
                  .text => {
                      const content = doc.string(data.text.content);
                      try writer.print("{f}", .{fmtHtml(content)});
-@@ -225,6 +233,14 @@ pub fn renderInlineNodeText(
+@@ -224,8 +232,16 @@ pub fn renderInlineNodeText(
+         .autolink, .code_span, .text => {
              const content = doc.string(data.text.content);
              try writer.print("{f}", .{fmtHtml(content)});
          },
@@ -119,3 +123,5 @@ diff --git a/wasm/markdown/renderer.zig b/wasm/markdown/renderer.zig
          .line_break => {
              try writer.writeAll("\n");
          },
+     }
+ }

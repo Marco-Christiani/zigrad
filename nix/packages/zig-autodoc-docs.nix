@@ -17,4 +17,5 @@ runCommand "zig-autodoc-docs-${zig.version}" {
   cp -R ${zig}/lib/docs "$out/docs"
   chmod -R u+w "$out/docs"
   patch --batch --forward --fuzz=0 --strip=1 --directory="$out/docs" < ${../patches/zig-autodoc-math.patch}
+  patch --batch --forward --fuzz=0 --strip=1 --directory="$out/docs" < ${../patches/zig-autodoc-namespace-alias.patch}
 ''
