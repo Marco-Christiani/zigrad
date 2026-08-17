@@ -953,10 +953,13 @@ pub const FunctionBuilder = struct {
     /// Ops emitted after this call belong to this region until pop_region is called.
     pub fn push_region(self: *FunctionBuilder, name: []const u8, annotations: []const Annotation) BuildError!void {
         const a = self.alloc();
-        try self.region_stack.append(a, .{
+        try self.region_stack.ensureUnusedCapacity(a, 1);
+        const name_copy = try a.dupe(u8, name);
+        const annotations_copy = try dupe_annotations(a, annotations);
+        self.region_stack.appendAssumeCapacity(.{
             .id = self.next_region(),
-            .name = try a.dupe(u8, name),
-            .annotations = try dupe_annotations(a, annotations),
+            .name = name_copy,
+            .annotations = annotations_copy,
             .start_index = @intCast(self.ops_list.items.len),
         });
     }
@@ -964,19 +967,23 @@ pub const FunctionBuilder = struct {
     /// Pop the most recent annotation region.
     pub fn pop_region(self: *FunctionBuilder) BuildError!void {
         const a = self.alloc();
-        const entry = self.region_stack.pop() orelse return;
+        const entry = self.region_stack.getLastOrNull() orelse return;
         const op_end: u32 = @intCast(self.ops_list.items.len);
         if (op_end > entry.start_index) {
+            try self.completed_regions.ensureUnusedCapacity(a, 1);
             const op_ids = try a.alloc(u32, op_end - entry.start_index);
             for (self.ops_list.items[entry.start_index..op_end], 0..) |op, i| {
                 op_ids[i] = op.id;
             }
-            try self.completed_regions.append(a, .{
+            _ = self.region_stack.pop();
+            self.completed_regions.appendAssumeCapacity(.{
                 .id = entry.id,
                 .name = entry.name,
                 .annotations = entry.annotations,
                 .op_ids = op_ids,
             });
+        } else {
+            _ = self.region_stack.pop();
         }
     }
 
@@ -989,12 +996,12 @@ pub const FunctionBuilder = struct {
     pub fn emit(self: *FunctionBuilder, params: Params, inputs: []const *Var) BuildError!*Var {
         const a = self.alloc();
 
+        try self.ops_list.ensureUnusedCapacity(a, 1);
         const out_aval = try ops.infer_output(a, params, inputs);
-        const out_var = try self.create_var(out_aval);
-
         const operands = try a.alloc(Operand, inputs.len);
         const op = try a.create(Op);
         const out_slice = try a.alloc(*Var, 1);
+        const out_var = try self.create_var(out_aval);
         out_slice[0] = out_var;
 
         op.* = .{ .id = self.next_op(), .inputs = operands, .outputs = out_slice, .params = params };
@@ -1011,7 +1018,7 @@ pub const FunctionBuilder = struct {
             in_var.first_use = &operands[i];
         }
 
-        try self.ops_list.append(a, op);
+        self.ops_list.appendAssumeCapacity(op);
         return out_var;
     }
 
@@ -1022,13 +1029,16 @@ pub const FunctionBuilder = struct {
     pub fn emit_outputs(self: *FunctionBuilder, params: Params, inputs: []const *Var, out_avals: []const Aval) BuildError![]*Var {
         const a = self.alloc();
 
+        try self.ops_list.ensureUnusedCapacity(a, 1);
         const out_vars = try a.alloc(*Var, out_avals.len);
-        for (out_avals, 0..) |aval, i| {
-            out_vars[i] = try self.create_var(aval);
-        }
-
+        const vars = try a.alloc(Var, out_avals.len);
         const operands = try a.alloc(Operand, inputs.len);
         const op = try a.create(Op);
+
+        for (out_avals, vars, out_vars) |aval, *out_var, *out_var_ptr| {
+            out_var.* = .{ .id = self.next_id(), .aval = aval };
+            out_var_ptr.* = out_var;
+        }
 
         op.* = .{ .id = self.next_op(), .inputs = operands, .outputs = out_vars, .params = params };
         for (out_vars) |v| v.defining_op = op;
@@ -1044,15 +1054,16 @@ pub const FunctionBuilder = struct {
             in_var.first_use = &operands[i];
         }
 
-        try self.ops_list.append(a, op);
+        self.ops_list.appendAssumeCapacity(op);
         return out_vars;
     }
 
     pub fn param_tensor(self: *FunctionBuilder, dtype: DType, dims: []const i64) BuildError!*Var {
         const a = self.alloc();
+        try self.params_list.ensureUnusedCapacity(a, 1);
         const dims_copy = try a.dupe(i64, dims);
         const v = try self.create_var(.{ .tensor = .{ .dtype = dtype, .shape = .{ .dims = dims_copy } } });
-        try self.params_list.append(a, v);
+        self.params_list.appendAssumeCapacity(v);
         return v;
     }
 
@@ -1309,19 +1320,23 @@ pub const FunctionBuilder = struct {
     pub fn finish(self: *FunctionBuilder, returns: []const *Var) BuildError!Function {
         const a = self.alloc();
 
+        for (self.ops_list.items) |op| try ops.validate(op);
         while (self.region_stack.items.len > 0) {
             try self.pop_region();
         }
 
+        const stored_returns = try a.dupe(*Var, returns);
         const func = Function{
             .name = self.name,
-            .params = try self.params_list.toOwnedSlice(a),
-            .returns = try a.dupe(*Var, returns),
-            .ops = try self.ops_list.toOwnedSlice(a),
-            .regions = try self.completed_regions.toOwnedSlice(a),
+            .params = self.params_list.items,
+            .returns = stored_returns,
+            .ops = self.ops_list.items,
+            .regions = self.completed_regions.items,
             .var_count = self.next_var_id,
         };
-        try validate_ops_in_func(func);
+        self.params_list = .empty;
+        self.ops_list = .empty;
+        self.completed_regions = .empty;
         return func;
     }
 };
@@ -1399,6 +1414,47 @@ test "FunctionBuilder reduce basic" {
     const y = try b.reduce(x, .{ .axes = &.{0}, .operation = .sum });
     const func = try b.finish(&.{y});
     try validate_ops_in_func(func);
+}
+
+test "FunctionBuilder finish preserves state after validation failure" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var builder = try FunctionBuilder.init(&program, "main");
+    defer builder.deinit();
+
+    const lhs = try builder.param_tensor(.f32, &.{ 2, 3 });
+    const rhs = try builder.param_tensor(.f32, &.{ 2, 3 });
+    const output = try builder.add(lhs, rhs);
+    const valid_aval = output.aval;
+    output.aval = .{ .tensor = .{ .dtype = .f64, .shape = .{ .dims = &.{ 2, 3 } } } };
+
+    try std.testing.expectError(error.AddTypeMismatch, builder.finish(&.{output}));
+    try std.testing.expectEqual(@as(usize, 2), builder.params_list.items.len);
+    try std.testing.expectEqual(@as(usize, 1), builder.ops_list.items.len);
+
+    output.aval = valid_aval;
+    const function = try builder.finish(&.{output});
+    try std.testing.expectEqual(@as(usize, 2), function.params.len);
+    try std.testing.expectEqual(@as(usize, 1), function.ops.len);
+}
+
+test "FunctionBuilder releases allocations after every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn build(allocator: Allocator) !void {
+            var program = Program.init(allocator);
+            defer program.deinit();
+            var builder = try FunctionBuilder.init(&program, "main");
+            defer builder.deinit();
+
+            const lhs = try builder.param_tensor(.f32, &.{ 2, 3 });
+            const rhs = try builder.param_tensor(.f32, &.{ 2, 3 });
+            try builder.push_region("sum", &.{});
+            const output = try builder.add(lhs, rhs);
+            const function = try builder.finish(&.{output});
+            try program.add_function(function);
+        }
+    }.build, .{});
 }
 
 test "FunctionBuilder literal scalar" {

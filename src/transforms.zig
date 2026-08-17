@@ -36,6 +36,14 @@ const Tree = utils.Tree;
 
 const Tensor = @import("tensor.zig");
 
+/// Options for Tensor-level differentiation transforms.
+pub const GradOpts = struct {
+    /// Zero-based function arguments whose Tensor leaves receive gradients.
+    /// One selection preserves that argument's structure. Multiple selections
+    ///  return a tuple in this order. Repeated argument numbers remain repeated.
+    wrt_argnums: []const usize = &.{0},
+};
+
 /// Result of a `value_and_grad` call during tracing.
 ///
 /// Use `.grads.extract(SelectedType)` to recover the selected structure, or
@@ -100,9 +108,11 @@ pub fn value_and_grad(comptime func: anytype, args: anytype, comptime opts: Grad
     //
     // The program arena releases intermediate trees with the program.
     var args_tree = try Tree(Tensor).from(alloc, args);
+    defer args_tree.deinit();
 
     // Collect Var pointers from the input tensors.
     const input_vars = try alloc.alloc(*pr.Var, args_tree.leaves.len);
+    defer alloc.free(input_vars);
     for (args_tree.leaves, 0..) |t, i| {
         input_vars[i] = try t.get_var();
     }
@@ -118,6 +128,7 @@ pub fn value_and_grad(comptime func: anytype, args: anytype, comptime opts: Grad
             return try Tensor.param(b, spec.dtype, spec.shape.const_slice());
         }
     }.f);
+    defer sub_tree.deinit();
 
     const loss_result: anyerror!Tensor = @call(.auto, func, try sub_tree.extract(ArgsType));
     const loss_tensor: Tensor = switch (@typeInfo(@TypeOf(loss_result))) {
@@ -135,6 +146,8 @@ pub fn value_and_grad(comptime func: anytype, args: anytype, comptime opts: Grad
     //  reference alongside the larger VJP function).
     // TODO(ad): Call the registered loss function from VJP instead of replaying
     //  its operations.
+    const initial_function_count = program.functions.len;
+    errdefer program.functions = program.functions[0..initial_function_count];
     try program.add_function(loss_func);
 
     // Request gradients only for the selected argument's leaves.
@@ -155,6 +168,7 @@ pub fn value_and_grad(comptime func: anytype, args: anytype, comptime opts: Grad
     //  input (not just params) plus the loss cotangent seed.
     const total_leaf_count = args_tree.leaves.len;
     const call_args = try alloc.alloc(*pr.Var, total_leaf_count + 1);
+    defer alloc.free(call_args);
     @memcpy(call_args[0..total_leaf_count], input_vars[0..total_leaf_count]);
     call_args[total_leaf_count] = cot;
 
@@ -168,6 +182,7 @@ pub fn value_and_grad(comptime func: anytype, args: anytype, comptime opts: Grad
 
     // Extract selected gradients into a Tree.
     const grad_leaves = try alloc.alloc(Tensor, grad_leaf_count);
+    defer alloc.free(grad_leaves);
     for (call_outputs[1..], 0..) |gv, i| {
         grad_leaves[i] = Tensor.from_var(builder, gv);
     }
@@ -188,14 +203,6 @@ pub fn value_and_grad(comptime func: anytype, args: anytype, comptime opts: Grad
 // Unlike the trace-time `value_and_grad` above (called inside a traced
 //  function body), these are called at comptime to *generate* a function
 //  that will itself be traced.
-
-/// Options for Tensor-level differentiation transforms.
-pub const GradOpts = struct {
-    /// Zero-based function arguments whose Tensor leaves receive gradients.
-    /// One selection preserves that argument's structure. Multiple selections
-    ///  return a tuple in this order. Repeated argument numbers remain repeated.
-    wrt_argnums: []const usize = &.{0},
-};
 
 /// Generate a function that computes gradients of `func` for selected arguments.
 ///
@@ -378,6 +385,33 @@ fn test_loss(params: TestParams, batch: TestBatch) !Tensor {
     const b_broadcast = try params.b.broadcast_in_dim(&.{ 3, 2 }, &.{1});
     const pred = try z.add(b_broadcast);
     return try pred.reduce(.{ .axes = &.{ 0, 1 }, .operation = .sum });
+}
+
+fn unsupported_loss(input: Tensor) !Tensor {
+    const builder = switch (input.backing) {
+        .traced => |traced| traced.builder,
+        else => return error.UnsupportedAval,
+    };
+    const input_var = try input.get_var();
+    const outputs = try builder.custom_call(.{
+        .target_name = "test.missing_vjp",
+        .has_side_effect = false,
+        .payload = &.{},
+    }, &.{input_var}, &.{input_var.aval});
+    return Tensor.from_var(builder, outputs[0]);
+}
+
+test "value_and_grad restores registered functions after failure" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+    var builder = try pr.FunctionBuilder.init(&program, "outer");
+    defer builder.deinit();
+    const input = try Tensor.param(&builder, .f32, &.{4});
+
+    try std.testing.expectError(error.UnsupportedEqn, value_and_grad(unsupported_loss, .{input}, .{}));
+    try std.testing.expectEqual(@as(usize, 0), program.functions.len);
+    try std.testing.expectError(error.UnsupportedEqn, value_and_grad(unsupported_loss, .{input}, .{}));
+    try std.testing.expectEqual(@as(usize, 0), program.functions.len);
 }
 
 test make_grad {
