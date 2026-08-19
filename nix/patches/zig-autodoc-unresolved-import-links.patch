@@ -28,3 +28,19 @@ diff --git a/wasm/html_render.zig b/wasm/html_render.zig
 +        else => return false,
 +    }
 +}
+diff --git a/wasm/Walk.zig b/wasm/Walk.zig
+--- a/wasm/Walk.zig
++++ b/wasm/Walk.zig
+@@ -321,6 +321,12 @@ pub const File = struct {
+                 if (modules.get(file_path)) |imported_file_index| {
+                     return .{ .alias = File.Index.findRootDecl(imported_file_index) };
+                 }
++                // The generated source bundle intentionally excludes Zig's
++                // standard library. It is not a missing local source file.
++                if (std.mem.eql(u8, file_path, "std")) {
++                    return .{ .global_const = node };
++                }
++
+                 const base_path = file_index.path();
+                 const resolved_path = std.fs.path.resolvePosix(gpa, &.{
+                     base_path, "..", file_path,
