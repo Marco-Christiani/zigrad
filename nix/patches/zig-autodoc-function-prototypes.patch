@@ -1,0 +1,78 @@
+diff --git a/main.js b/main.js
+--- a/main.js
++++ b/main.js
+@@ -415 +415 @@
+-      domFnProtoCode.innerHTML = fnProtoHtml(decl_index, false);
++      domFnProtoCode.innerHTML = fnProtoHtml(decl_index, false, true);
+@@ -548 +548 @@
+-              protoCodeDom.innerHTML = fnProtoHtml(decl, true);
++              protoCodeDom.innerHTML = fnProtoHtml(decl, true, false);
+@@ -934,2 +934,2 @@
+-    function fnProtoHtml(decl_index, linkify_fn_name) {
+-      return unwrapString(wasm_exports.decl_fn_proto_html(decl_index, linkify_fn_name));
++    function fnProtoHtml(decl_index, linkify_fn_name, preserve_layout) {
++      return unwrapString(wasm_exports.decl_fn_proto_html(decl_index, linkify_fn_name, preserve_layout));
+diff --git a/wasm/html_render.zig b/wasm/html_render.zig
+--- a/wasm/html_render.zig
++++ b/wasm/html_render.zig
+@@ -17,6 +17,7 @@ pub const RenderSourceOptions = struct {
+     skip_doc_comments: bool = false,
+     skip_comments: bool = false,
+     collapse_whitespace: bool = false,
++    omit_trailing_param_comma: bool = false,
+     fn_link: Decl.Index = .none,
+     /// Assumed to be sorted ascending.
+     source_location_annotations: []const Annotation = &.{},
+@@ -82,2 +82,14 @@ pub fn fileSourceHtml(
+         const between = ast.source[cursor..start];
++        const preceding_tag = p: {
++            var index = token_index;
++            while (index > start_token) {
++                index -= 1;
++                const candidate = ast.tokenTag(index);
++                if (options.skip_doc_comments and (candidate == .doc_comment or candidate == .container_doc_comment)) continue;
++                break :p candidate;
++            }
++            break :p .eof;
++        };
++        const skip_leading_doc_whitespace = options.skip_doc_comments and
++            (tag == .doc_comment or tag == .container_doc_comment);
+         if (std.mem.trim(u8, between, " \t\r\n").len > 0) {
+@@ -89,13 +101,18 @@ pub fn fileSourceHtml(
+-        } else if (between.len > 0) {
++        } else if (between.len > 0 and !skip_leading_doc_whitespace) {
+             if (options.collapse_whitespace) {
+-                if (out.items.len > 0 and out.items[out.items.len - 1] != ' ')
++                const needs_space = preceding_tag != .l_paren and tag != .r_paren and tag != .comma;
++                if (needs_space and out.items.len > 0 and out.items[out.items.len - 1] != ' ')
+                     try out.append(gpa, ' ');
+             } else {
+                 try appendUnindented(out, between, indent);
+             }
+         }
+         if (tag == .eof) break;
+         const slice = ast.tokenSlice(token_index);
+         cursor = start + slice.len;
+-
++        if (options.omit_trailing_param_comma and tag == .comma and
++            token_index + 1 < end_token and ast.tokenTag(token_index + 1) == .r_paren)
++        {
++            continue;
++        }
+         // Insert annotations.
+diff --git a/wasm/main.zig b/wasm/main.zig
+--- a/wasm/main.zig
++++ b/wasm/main.zig
+@@ -520 +520 @@
+-export fn decl_fn_proto_html(decl_index: Decl.Index, linkify_fn_name: bool) String {
++export fn decl_fn_proto_html(decl_index: Decl.Index, linkify_fn_name: bool, preserve_layout: bool) String {
+@@ -536,7 +536,8 @@ export fn decl_fn_proto_html(decl_index: Decl.Index, linkify_fn_name: bool) Str
+     fileSourceHtml(decl.file, &string_result, proto_node, .{
+         .skip_doc_comments = true,
+         .skip_comments = true,
+-        .collapse_whitespace = true,
++        .collapse_whitespace = !preserve_layout,
++        .omit_trailing_param_comma = true,
+         .fn_link = if (linkify_fn_name) decl_index else .none,
+     }) catch |err| {
+         std.debug.panic("unable to render source: {s}", .{@errorName(err)});

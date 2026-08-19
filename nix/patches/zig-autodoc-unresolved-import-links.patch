@@ -1,0 +1,30 @@
+diff --git a/wasm/html_render.zig b/wasm/html_render.zig
+--- a/wasm/html_render.zig
++++ b/wasm/html_render.zig
+@@ -407,9 +407,26 @@ fn unindent(s: []const u8, indent: usize) []const u8 {
+ }
+
+ pub fn resolveDeclLink(decl_index: Decl.Index, out: *ArrayList(u8)) Oom!void {
+     const decl = decl_index.get();
+     switch (decl.categorize()) {
+         .alias => |alias_decl| try alias_decl.get().fqn(out),
++        .global_const => {
++            if (is_unresolved_import_alias(decl)) return;
++            try decl.fqn(out);
++        },
+         else => try decl.fqn(out),
+     }
+ }
++
++fn is_unresolved_import_alias(decl: *const Decl) bool {
++    const init_node = decl.value_node() orelse return false;
++    const ast = decl.file.get_ast();
++    switch (ast.nodeTag(init_node)) {
++        .builtin_call_two,
++        .builtin_call_two_comma,
++        .builtin_call,
++        .builtin_call_comma,
++        => return std.mem.eql(u8, ast.tokenSlice(ast.nodeMainToken(init_node)), "@import"),
++        else => return false,
++    }
++}
