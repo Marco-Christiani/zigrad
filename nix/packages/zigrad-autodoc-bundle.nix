@@ -30,8 +30,22 @@
     }
   ];
   assetSpec = builtins.toFile "zigrad-autodoc-assets.json" (builtins.toJSON assets);
+  sourceSpec = builtins.toFile "zigrad-autodoc-sources.json" (builtins.toJSON (
+    zigradAutodoc.autodocSources
+    // {
+      zigrad = {
+        repository = "https://github.com/Marco-Christiani/zigrad";
+        inherit revision;
+        revision_url = "https://github.com/Marco-Christiani/zigrad/commit/${revision}";
+        file_url_template = "https://github.com/Marco-Christiani/zigrad/blob/${revision}/src/{path}";
+      };
+    }
+  ));
   validRevision = revision != null && builtins.match "[0-9a-f]{40}" revision != null;
-  targetName = if localPreview then "zigrad-autodoc-preview" else "zigrad-autodoc-candidate";
+  targetName =
+    if localPreview
+    then "zigrad-autodoc-preview"
+    else "zigrad-autodoc-candidate";
 in
   assert lib.assertMsg validRevision "${targetName} requires a Git revision";
     runCommand "${targetName}-${builtins.substring 0 12 revision}" {
@@ -46,7 +60,11 @@ in
       cp -R ${zigradAutodoc}/autodoc "$out"
       chmod -R u+w "$out"
 
-      if ${if localPreview then "true" else "false"}; then
+      if ${
+        if localPreview
+        then "true"
+        else "false"
+      }; then
         bundle_id="$(${coreutils}/bin/sha256sum "$out"/* | ${coreutils}/bin/sha256sum | ${coreutils}/bin/cut -c1-40)"
       else
         bundle_id="${revision}"
@@ -64,7 +82,7 @@ in
 
         sha256="$(${coreutils}/bin/sha256sum "$path" | ${coreutils}/bin/cut -d' ' -f1)"
         size="$(${coreutils}/bin/stat --format=%s "$path")"
-        key="autodoc/v1/bundles/$bundle_id/$name"
+        key="autodoc/source/v1/bundles/$bundle_id/$name"
 
         ${jq}/bin/jq \
           --arg name "$name" \
@@ -85,16 +103,20 @@ in
       ${jq}/bin/jq \
         --null-input \
         --arg bundle_id "$bundle_id" \
-        --arg commit "${revision}" \
         --arg zig_version "${zigradAutodoc.zigVersion}" \
-        --argjson local_preview ${if localPreview then "true" else "false"} \
+        --argjson local_preview ${
+        if localPreview
+        then "true"
+        else "false"
+      } \
         --slurpfile assets "$assets_json" \
+        --slurpfile sources ${sourceSpec} \
         '{
           schema_version: 1,
           bundle_id: $bundle_id,
-          commit: $commit,
           zig_version: $zig_version,
           local_preview: $local_preview,
+          sources: $sources[0],
           assets: $assets[0]
         }' > "$out/manifest.json"
     ''

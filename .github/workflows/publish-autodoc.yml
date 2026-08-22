@@ -58,7 +58,7 @@ jobs:
           set -euo pipefail
           aws="./result-awscli/bin/aws"
           jq="./result-jq/bin/jq"
-          prefix="autodoc/v1/bundles/$BUNDLE_ID"
+          prefix="autodoc/source/v1/bundles/$BUNDLE_ID"
           manifest="candidate/manifest.json"
 
           if "$aws" s3api head-object \

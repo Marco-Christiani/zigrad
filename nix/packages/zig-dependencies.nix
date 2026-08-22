@@ -6,11 +6,17 @@
   stdenv,
   withPjrt ? false,
 }: let
+  safetensorsSource = {
+    repository = "https://github.com/Marco-Christiani/safetensors-zg";
+    revision = "942ac8fd88b7b087679fbddde99c0a38dd3a2fce";
+    revision_url = "https://github.com/Marco-Christiani/safetensors-zg/commit/942ac8fd88b7b087679fbddde99c0a38dd3a2fce";
+    file_url_template = "https://github.com/Marco-Christiani/safetensors-zg/blob/942ac8fd88b7b087679fbddde99c0a38dd3a2fce/src/{path}";
+  };
   safetensors = {
     name = "safetensors_zg-0.0.1-dRXUiKDwAACCb13L0frixHBXg-rZ_rQru5ZjxFb0lfZa";
     path = fetchgit {
-      url = "https://github.com/Marco-Christiani/safetensors-zg";
-      rev = "942ac8fd88b7b087679fbddde99c0a38dd3a2fce";
+      url = safetensorsSource.repository;
+      rev = safetensorsSource.revision;
       hash = "sha256-TxjhAaY/arJfW+v/YqWgLwsf6PRzPDeYuiv+um3sf/A=";
     };
   };
@@ -48,10 +54,12 @@
     };
   };
 in
-  linkFarm "zig-packages" (
+  (linkFarm "zig-packages" (
     [safetensors]
     ++ lib.optionals withPjrt [
       protobuf
       protoc
     ]
-  )
+  )).overrideAttrs (_: {
+    passthru.autodocSources.safetensors_zg = safetensorsSource;
+  })

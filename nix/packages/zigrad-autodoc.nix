@@ -72,7 +72,10 @@ in
       runHook postInstall
     '';
 
-    passthru.zigVersion = zig.version;
+    passthru = {
+      autodocSources = zigDeps.autodocSources;
+      zigVersion = zig.version;
+    };
 
     meta = {
       description = "Zigrad Zig autodoc bundle";

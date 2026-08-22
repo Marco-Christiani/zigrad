@@ -1,17 +1,3 @@
-diff --git a/main.js b/main.js
---- a/main.js
-+++ b/main.js
-@@ -415 +415 @@
--      domFnProtoCode.innerHTML = fnProtoHtml(decl_index, false);
-+      domFnProtoCode.innerHTML = fnProtoHtml(decl_index, false, true);
-@@ -548 +548 @@
--              protoCodeDom.innerHTML = fnProtoHtml(decl, true);
-+              protoCodeDom.innerHTML = fnProtoHtml(decl, true, false);
-@@ -934,2 +934,2 @@
--    function fnProtoHtml(decl_index, linkify_fn_name) {
--      return unwrapString(wasm_exports.decl_fn_proto_html(decl_index, linkify_fn_name));
-+    function fnProtoHtml(decl_index, linkify_fn_name, preserve_layout) {
-+      return unwrapString(wasm_exports.decl_fn_proto_html(decl_index, linkify_fn_name, preserve_layout));
 diff --git a/wasm/html_render.zig b/wasm/html_render.zig
 --- a/wasm/html_render.zig
 +++ b/wasm/html_render.zig

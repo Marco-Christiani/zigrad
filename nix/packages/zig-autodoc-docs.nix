@@ -18,7 +18,6 @@ runCommand "zig-autodoc-docs-${zig.version}" {
   chmod -R u+w "$out/docs"
   patch --batch --forward --fuzz=0 --strip=1 --directory="$out/docs" < ${../patches/zig-autodoc-math.patch}
   patch --batch --forward --fuzz=0 --strip=1 --directory="$out/docs" < ${../patches/zig-autodoc-namespace-alias.patch}
-  patch --batch --forward --fuzz=0 --strip=1 --directory="$out/docs" < ${../patches/zig-autodoc-hash-navigation.patch}
   patch --batch --forward --fuzz=0 --strip=1 --directory="$out/docs" < ${../patches/zig-autodoc-unresolved-import-links.patch}
   patch --batch --forward --fuzz=0 --strip=1 --directory="$out/docs" < ${../patches/zig-autodoc-function-prototypes.patch}
 ''
