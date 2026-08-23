@@ -175,6 +175,7 @@ in
 
     meta = {
       description = "Zigrad application ${pname}";
+      # TODO(release): license, etc.
       license = lib.licenses.asl20;
       inherit mainProgram;
       platforms = lib.platforms.linux;

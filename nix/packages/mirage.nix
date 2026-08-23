@@ -173,8 +173,9 @@ in
 
     meta = {
       description = "Mirage symbolic superoptimizer and CUDA transpiler";
-      homepage = "https://github.com/mirage-project/mirage";
+      # TODO(release): license, etc.
       license = lib.licenses.asl20;
+      homepage = "https://github.com/mirage-project/mirage";
       platforms = lib.platforms.linux;
     };
   }

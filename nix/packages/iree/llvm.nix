@@ -137,6 +137,7 @@ stdenv.mkDerivation {
 
   meta = {
     description = "LLVM+Clang+LLD+MLIR built from IREE's fork, for use as BYO-LLVM in iree-compiler";
+    # TODO(release): license, etc.
     license = lib.licenses.asl20;
   };
 }

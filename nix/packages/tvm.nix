@@ -332,6 +332,7 @@ in
 
       meta = {
         description = "Apache TVM compiler stack";
+        # TODO(release): license, etc.
         license = lib.licenses.asl20;
         platforms = lib.platforms.linux;
       };

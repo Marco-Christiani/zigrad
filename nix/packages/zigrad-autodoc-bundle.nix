@@ -52,7 +52,7 @@ in
       nativeBuildInputs = [coreutils jq];
       passthru = {
         inherit localPreview revision;
-        zigVersion = zigradAutodoc.zigVersion;
+        inherit (zigradAutodoc) zigVersion;
       };
     } ''
       set -euo pipefail

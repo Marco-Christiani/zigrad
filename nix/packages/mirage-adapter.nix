@@ -64,6 +64,7 @@ in
 
     meta = {
       description = "Zigrad-owned C adapter for Mirage";
+      # TODO(release): license, etc.
       license = lib.licenses.asl20;
       platforms = lib.platforms.linux;
     };

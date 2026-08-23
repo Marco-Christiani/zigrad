@@ -552,7 +552,7 @@
             defaults = {};
             prefixes = runtimeEnvPrefixes;
           };
-          demands = definition.demands;
+          inherit (definition) demands;
         };
         externalInputs = externalInputs.combined;
       };

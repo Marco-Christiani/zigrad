@@ -125,6 +125,7 @@
           '';
       };
 
+      # TODO: update or delete this (should be updated)
       zig = pkgs.mkShellNoCC {
         packages = baseDevShellPkgs ++ [config.packages.zigrad-dev-cuda];
         env = integrationEnv config.packages.zigrad-dev-cuda;

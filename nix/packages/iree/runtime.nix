@@ -246,6 +246,7 @@ assert lib.assertMsg (!lib.elem "cuda" drivers || cudaToolkit != null)
 
     meta = {
       description = "IREE runtime static archives for ${lib.concatStringsSep ", " drivers}";
+      # TODO(release): license, etc.
       license = lib.licenses.asl20;
     };
 

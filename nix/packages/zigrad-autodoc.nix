@@ -50,7 +50,7 @@ in
       mkdir "$sources_tmp/extracted"
       tar -xf "$sources_tar" -C "$sources_tmp/extracted"
 
-      # prune stdlib and such, whitelist.
+      # prune stdlib et al w/ a whitelist policy
       for source_root in zigrad safetensors_zg build_options build_options0; do
         if [ ! -e "$sources_tmp/extracted/$source_root" ]; then
           echo "missing expected autodoc source root: $source_root" >&2
@@ -73,7 +73,7 @@ in
     '';
 
     passthru = {
-      autodocSources = zigDeps.autodocSources;
+      inherit (zigDeps) autodocSources;
       zigVersion = zig.version;
     };
 

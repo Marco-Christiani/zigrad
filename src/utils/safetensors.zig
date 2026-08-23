@@ -16,9 +16,17 @@ pub const Opts = struct {
 
 /// Serialize a host-backed tensor tree using its field paths as tensor names.
 ///
-/// `T` may contain `Tensor` leaves, structs, and arrays. Every tensor must use
-/// host storage. The caller owns the returned SafeTensors bytes.
-pub fn to_safetensors(comptime T: type, value: T, allocator: std.mem.Allocator) ![]u8 {
+///
+/// Caller owns the returned SafeTensors bytes.
+///
+/// TODO: parity with from_safetensors?
+pub fn to_safetensors(
+    /// A type containing `Tensor` leaves, structs, and/or arrays.
+    comptime T: type,
+    // Every tensor value must use host storage.
+    value: T,
+    allocator: std.mem.Allocator,
+) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     var tensors = std.ArrayList(stz.Tensor).empty;
@@ -102,33 +110,34 @@ test stz_dtype {
 
 /// Load a struct of `Tensor` leaves from a safetensors file.
 ///
-/// The user declares a struct of type `T` whose field paths mirror
-///  the safetensors checkpoint key hierarchy. `from_safetensors` walks
-///  T` at comptime, producing a value of type `T` with every `Tensor`
+/// Caller provides a struct of type `T` whose field paths mirror
+///  the safetensors checkpoint key hierarchy. This function walks `T`
+///  at comptime, producing a value of type `T` with every `Tensor`
 ///  leaf loaded from the `st` file.
 ///
 /// ## Supported field shapes
 ///
 /// - `Tensor`         : required leaf. Looked up at the accumulated field path.
 ///                       `stz.Error.TensorNotFound` if missing.
-/// - `struct { ... }` : recurse into fields, extending the path with
-///                      `.field_name`.
+/// - `struct { ... }` : recurse into fields, extending the path with the field
+///                       names ("." delimeter).
 /// - `[N]T`           : recurse into elements, extending the path with
-///                      `.{index}`.
+///                      numeric index ("." delimeter).
 /// - `?T`             : optional subtree. `stz.Error.TensorNotFound` *anywhere
 ///                       inside the subtree becomes `null` at the optional
-///                       level.* Used for tied weights:
+///                       level.* Useful for things such as tied weights:
 ///                       declare `lm_head: ?struct { weight: Tensor }`
 ///                       and the consumer resolves the alias at use time.
 ///
-/// Any other type is a compile error. No extension points right now, if we
-///  need different loading behavior per field, consider extending this walker
-///  rather than forking at the call site.
+/// Any other type is a compile error.
+///
+/// NOTE: No extension points right now, if we need different loading behavior per field,
+///  consider extending this walker rather than forking at the call site.
 ///
 /// ## Zero-copy semantics
 ///
 /// When the checkpoint's dtype matches the target dtype, each `Tensor` is
-///  constructed as a `.borrow` view into the mmap'd checkpoint bytes.
+///  constructed as a `Tensor.HostSrc.borrow` view into the mmap'd checkpoint bytes.
 ///
 /// When dtypes differ, the walker allocates and converts element-wise
 ///  (f32/bf16 only). The caller keeps the mmap alive until after the

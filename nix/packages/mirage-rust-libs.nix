@@ -55,6 +55,7 @@
 
       meta = {
         description = "Mirage Rust cdylib: ${pname}";
+        # TODO(release): license, etc.
         license = lib.licenses.asl20;
         platforms = lib.platforms.linux;
       };

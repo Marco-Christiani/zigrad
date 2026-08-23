@@ -128,6 +128,7 @@ stdenv.mkDerivation {
 
   meta = {
     description = "LLVM selected by the Zigrad dependency snapshot";
+    # TODO(release): license, etc.
     license = lib.licenses.asl20;
     platforms = lib.platforms.linux;
   };

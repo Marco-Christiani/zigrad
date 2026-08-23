@@ -165,6 +165,7 @@ in
 
     meta = {
       description = "Zigrad: differentiable computation framework";
+      # TODO(release): license, etc.
       license = lib.licenses.asl20;
       mainProgram = "zigrad";
       platforms = lib.platforms.linux;

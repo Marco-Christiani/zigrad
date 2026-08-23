@@ -81,6 +81,7 @@ stdenv.mkDerivation {
 
   meta = {
     description = "C++ MLIR dialect and pass example for Zigrad";
+    # TODO(release): license, etc.
     license = lib.licenses.asl20;
     platforms = lib.platforms.linux;
   };

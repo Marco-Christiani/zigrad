@@ -287,6 +287,7 @@ in
 
     meta = {
       description = "MLIR + StableHLO + PJRT C API SDK";
+      # TODO(release): license, etc.
       license = lib.licenses.asl20;
     };
   }

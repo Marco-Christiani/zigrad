@@ -243,6 +243,7 @@ assert lib.assertMsg (!lib.elem "cuda" targetBackends || cudaToolkit != null)
 
     meta = {
       description = "IREE compiler CLI with StableHLO target support";
+      # TODO(release): license, etc.
       license = lib.licenses.asl20;
     };
   }
