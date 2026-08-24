@@ -100,4 +100,18 @@ jobs:
             --cache-control 'public, max-age=31536000, immutable' \
             --endpoint-url "$R2_ENDPOINT_URL" >/dev/null
 
+          # A successful put is insufficient if a manifest key and upload key
+          # diverge. Verify the complete immutable bundle before reporting it.
+          while IFS= read -r key; do
+            "$aws" s3api head-object \
+              --bucket "$R2_BUCKET" \
+              --key "$key" \
+              --endpoint-url "$R2_ENDPOINT_URL" >/dev/null
+          done < <("$jq" -r '.assets[].key' "$manifest")
+
+          "$aws" s3api head-object \
+            --bucket "$R2_BUCKET" \
+            --key "$prefix/manifest.json" \
+            --endpoint-url "$R2_ENDPOINT_URL" >/dev/null
+
           echo "Published candidate $BUNDLE_ID. current.json was not changed."
