@@ -44,7 +44,7 @@ jobs:
       - name: Install publication tools
         run: |
           nix build nixpkgs#awscli2 --out-link result-awscli
-          nix build nixpkgs#jq --out-link result-jq
+          nix build nixpkgs#jq.bin --out-link result-jq
 
       - name: Publish immutable candidate objects
         env:
@@ -88,9 +88,16 @@ jobs:
               --endpoint-url "$R2_ENDPOINT_URL" >/dev/null
           }
 
+          # Materialize jq output first. A failed process substitution does not
+          # make `set -e` fail the surrounding while loop.
+          asset_rows="$RUNNER_TEMP/autodoc-assets.tsv"
+          "$jq" -r \
+            '.assets | to_entries[] | [.value.key, .value.content_type] | @tsv' \
+            "$manifest" > "$asset_rows"
+
           while IFS=$'\t' read -r key content_type; do
             upload_asset "$key" "$content_type"
-          done < <("$jq" -r '.assets | to_entries[] | [.value.key, .value.content_type] | @tsv' "$manifest")
+          done < "$asset_rows"
 
           "$aws" s3api put-object \
             --bucket "$R2_BUCKET" \
@@ -102,12 +109,15 @@ jobs:
 
           # A successful put is insufficient if a manifest key and upload key
           # diverge. Verify the complete immutable bundle before reporting it.
+          asset_keys="$RUNNER_TEMP/autodoc-asset-keys"
+          "$jq" -r '.assets[].key' "$manifest" > "$asset_keys"
+
           while IFS= read -r key; do
             "$aws" s3api head-object \
               --bucket "$R2_BUCKET" \
               --key "$key" \
               --endpoint-url "$R2_ENDPOINT_URL" >/dev/null
-          done < <("$jq" -r '.assets[].key' "$manifest")
+          done < "$asset_keys"
 
           "$aws" s3api head-object \
             --bucket "$R2_BUCKET" \
