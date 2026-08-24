@@ -37,7 +37,7 @@ jobs:
         id: candidate
         run: |
           set -euo pipefail
-          bundle_id="$(nix eval --raw .#zigrad-autodoc-candidate.bundleId)"
+          bundle_id="$(nix eval --raw .#zigrad-autodoc-candidate.revision)"
           test "$bundle_id" = "$(git rev-parse HEAD)"
           printf 'bundle_id=%s\n' "$bundle_id" >> "$GITHUB_OUTPUT"
 
