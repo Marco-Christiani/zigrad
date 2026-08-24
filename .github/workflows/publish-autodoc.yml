@@ -41,11 +41,6 @@ jobs:
           test "$bundle_id" = "$(git rev-parse HEAD)"
           printf 'bundle_id=%s\n' "$bundle_id" >> "$GITHUB_OUTPUT"
 
-      - name: Install publication tools
-        run: |
-          nix build nixpkgs#awscli2 --out-link result-awscli
-          nix build nixpkgs#jq.bin --out-link result-jq
-
       - name: Publish immutable candidate objects
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -56,8 +51,8 @@ jobs:
           BUNDLE_ID: ${{ steps.candidate.outputs.bundle_id }}
         run: |
           set -euo pipefail
-          aws="./result-awscli/bin/aws"
-          jq="./result-jq/bin/jq"
+          aws="$(nix build nixpkgs#awscli2 --no-link --print-out-paths)/bin/aws"
+          jq="$(nix build nixpkgs#jq.bin --no-link --print-out-paths)/bin/jq"
           prefix="autodoc/source/v1/bundles/$BUNDLE_ID"
           manifest="candidate/manifest.json"
 
