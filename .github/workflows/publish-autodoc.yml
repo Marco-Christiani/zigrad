@@ -42,6 +42,7 @@ jobs:
           printf 'bundle_id=%s\n' "$bundle_id" >> "$GITHUB_OUTPUT"
 
       - name: Publish immutable candidate objects
+        shell: "nix shell --inputs-from . nixpkgs#awscli2 nixpkgs#jq -c bash -e {0}"
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -51,16 +52,14 @@ jobs:
           BUNDLE_ID: ${{ steps.candidate.outputs.bundle_id }}
         run: |
           set -euo pipefail
-          aws="$(nix build nixpkgs#awscli2 --no-link --print-out-paths)/bin/aws"
-          jq="$(nix build nixpkgs#jq.bin --no-link --print-out-paths)/bin/jq"
           prefix="autodoc/source/v1/bundles/$BUNDLE_ID"
           manifest="candidate/manifest.json"
 
-          if "$aws" s3api head-object \
+          if aws s3api head-object \
             --bucket "$R2_BUCKET" \
             --key "$prefix/manifest.json" \
             --endpoint-url "$R2_ENDPOINT_URL" >/dev/null 2>&1; then
-            "$aws" s3api get-object \
+            aws s3api get-object \
               --bucket "$R2_BUCKET" \
               --key "$prefix/manifest.json" \
               --endpoint-url "$R2_ENDPOINT_URL" \
@@ -74,7 +73,7 @@ jobs:
             key="$1"
             content_type="$2"
             name="${key##*/}"
-            "$aws" s3api put-object \
+            aws s3api put-object \
               --bucket "$R2_BUCKET" \
               --key "$key" \
               --body "candidate/$name" \
@@ -86,7 +85,7 @@ jobs:
           # Materialize jq output first. A failed process substitution does not
           # make `set -e` fail the surrounding while loop.
           asset_rows="$RUNNER_TEMP/autodoc-assets.tsv"
-          "$jq" -r \
+          jq -r \
             '.assets | to_entries[] | [.value.key, .value.content_type] | @tsv' \
             "$manifest" > "$asset_rows"
 
@@ -94,7 +93,7 @@ jobs:
             upload_asset "$key" "$content_type"
           done < "$asset_rows"
 
-          "$aws" s3api put-object \
+          aws s3api put-object \
             --bucket "$R2_BUCKET" \
             --key "$prefix/manifest.json" \
             --body "$manifest" \
@@ -105,16 +104,16 @@ jobs:
           # A successful put is insufficient if a manifest key and upload key
           # diverge. Verify the complete immutable bundle before reporting it.
           asset_keys="$RUNNER_TEMP/autodoc-asset-keys"
-          "$jq" -r '.assets[].key' "$manifest" > "$asset_keys"
+          jq -r '.assets[].key' "$manifest" > "$asset_keys"
 
           while IFS= read -r key; do
-            "$aws" s3api head-object \
+            aws s3api head-object \
               --bucket "$R2_BUCKET" \
               --key "$key" \
               --endpoint-url "$R2_ENDPOINT_URL" >/dev/null
           done < "$asset_keys"
 
-          "$aws" s3api head-object \
+          aws s3api head-object \
             --bucket "$R2_BUCKET" \
             --key "$prefix/manifest.json" \
             --endpoint-url "$R2_ENDPOINT_URL" >/dev/null
