@@ -38,21 +38,21 @@ pub const exp = struct {
         return try infer_unary_elementwise(error.ExpTypeMismatch, inputs);
     }
 
-    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
+    pub fn vjp(ctx: types.VjpContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 1) return error.InvalidOpArity;
 
-        const out_cot = ctx.get_cot(op.result(0)) orelse return;
-        const out_primal = ctx.get_primal(op.result(0)) orelse return error.UnsupportedEqn;
+        const out_cot = ctx.cotangent(op.result(0)) orelse return;
+        const out_primal = try ctx.primal(op.result(0));
         const contrib = try ctx.builder.multiply(out_cot, out_primal);
-        try ctx.add_cot(op.operand(0), contrib);
+        try ctx.add_cotangent(op.operand(0), contrib);
     }
 
     /// JVP: \(\mathrm{d}(\exp(x)) = \exp(x)\,\mathrm{d}x\).
-    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.JvpContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 1) return error.InvalidOpArity;
 
-        const dx = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
-        const out_primal = ctx.get_primal(op.result(0)) orelse return error.UnsupportedEqn;
+        const dx = try ctx.tangent_or_zero(op.operand(0));
+        const out_primal = try ctx.primal(op.result(0));
         ctx.set_tangent(op.result(0), try ctx.builder.multiply(out_primal, dx));
     }
 
@@ -72,21 +72,21 @@ pub const log = struct {
         return try infer_unary_elementwise(error.LogTypeMismatch, inputs);
     }
 
-    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
+    pub fn vjp(ctx: types.VjpContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 1) return error.InvalidOpArity;
 
-        const out_cot = ctx.get_cot(op.result(0)) orelse return;
-        const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+        const out_cot = ctx.cotangent(op.result(0)) orelse return;
+        const operand = try ctx.primal(op.operand(0));
         const contrib = try ctx.builder.divide(out_cot, operand);
-        try ctx.add_cot(op.operand(0), contrib);
+        try ctx.add_cotangent(op.operand(0), contrib);
     }
 
     /// JVP: \(\mathrm{d}(\log(x)) = \mathrm{d}x / x\).
-    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.JvpContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 1) return error.InvalidOpArity;
 
-        const dx = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
-        const x = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+        const dx = try ctx.tangent_or_zero(op.operand(0));
+        const x = try ctx.primal(op.operand(0));
         ctx.set_tangent(op.result(0), try ctx.builder.divide(dx, x));
     }
 
@@ -113,25 +113,25 @@ pub const convert = struct {
         return .{ .tensor = .{ .dtype = out_dtype, .shape = operand.shape } };
     }
 
-    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: pr.DType) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
+    pub fn vjp(ctx: types.VjpContext, op: *const pr.Op, _: pr.DType) types.AdError!void {
+        if (op.inputs.len != 1) return error.InvalidOpArity;
 
-        const out_cot = ctx.get_cot(op.result(0)) orelse return;
+        const out_cot = ctx.cotangent(op.result(0)) orelse return;
         const in_tensor = op.operand(0).as_tensor();
         const out_tensor = op.result(0).as_tensor();
         const cot = if (out_tensor.dtype == in_tensor.dtype)
             out_cot
         else
             try ctx.builder.convert(out_cot, in_tensor.dtype);
-        try ctx.add_cot(op.operand(0), cot);
+        try ctx.add_cotangent(op.operand(0), cot);
     }
 
     /// JVP: \(\mathrm{d}(\operatorname{convert}(x, T)) =
     ///  \operatorname{convert}(\mathrm{d}x, T)\).
-    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, out_dtype: pr.DType) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.JvpContext, op: *const pr.Op, out_dtype: pr.DType) types.AdError!void {
+        if (op.inputs.len != 1) return error.InvalidOpArity;
 
-        const dx = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
+        const dx = try ctx.tangent_or_zero(op.operand(0));
         const dx_tensor = dx.as_tensor();
         const result = if (dx_tensor.dtype == out_dtype) dx else try ctx.builder.convert(dx, out_dtype);
         ctx.set_tangent(op.result(0), result);
@@ -155,12 +155,12 @@ pub const rsqrt = struct {
     ///  -0.5\,\operatorname{rsqrt}(x)^3\,\mathrm{d}x\).
     /// Uses the forward output \(y = \operatorname{rsqrt}(x)\) directly:
     /// \(\mathrm{scale} = -0.5\,y^3\).
-    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
+    pub fn vjp(ctx: types.VjpContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 1) return error.InvalidOpArity;
 
-        const out_cot = ctx.get_cot(op.result(0)) orelse return;
+        const out_cot = ctx.cotangent(op.result(0)) orelse return;
         // y = rsqrt(x), reuse from forward pass to avoid recomputing sqrt.
-        const out_primal = ctx.get_primal(op.result(0)) orelse return error.UnsupportedEqn;
+        const out_primal = try ctx.primal(op.result(0));
         const y2 = try ctx.builder.multiply(out_primal, out_primal); // y^2
         const y3 = try ctx.builder.multiply(y2, out_primal); // y^3
 
@@ -169,16 +169,16 @@ pub const rsqrt = struct {
         const neg_half = try ctx.builder.scalar_broadcast(tensor.dtype, tensor.shape.dims, -0.5);
         const scale = try ctx.builder.multiply(y3, neg_half);
         const contrib = try ctx.builder.multiply(out_cot, scale);
-        try ctx.add_cot(op.operand(0), contrib);
+        try ctx.add_cotangent(op.operand(0), contrib);
     }
 
     /// JVP: \(\mathrm{d}(\operatorname{rsqrt}(x)) =
     ///  -0.5\,\operatorname{rsqrt}(x)^3\,\mathrm{d}x\).
-    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.JvpContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 1) return error.InvalidOpArity;
 
-        const dx = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
-        const out_primal = ctx.get_primal(op.result(0)) orelse return error.UnsupportedEqn;
+        const dx = try ctx.tangent_or_zero(op.operand(0));
+        const out_primal = try ctx.primal(op.result(0));
         const y2 = try ctx.builder.multiply(out_primal, out_primal); // y^2
         const y3 = try ctx.builder.multiply(y2, out_primal); // y^3
 
@@ -207,12 +207,12 @@ pub const logistic = struct {
     /// VJP: \(\mathrm{d}(\operatorname{sigmoid}(x)) =
     ///  \operatorname{sigmoid}(x)(1 - \operatorname{sigmoid}(x))\,\mathrm{d}x\).
     /// Uses the forward output directly to avoid recomputing the sigmoid.
-    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
+    pub fn vjp(ctx: types.VjpContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 1) return error.InvalidOpArity;
 
-        const out_cot = ctx.get_cot(op.result(0)) orelse return;
+        const out_cot = ctx.cotangent(op.result(0)) orelse return;
         // y = sigmoid(x), reuse from forward pass.
-        const out_primal = ctx.get_primal(op.result(0)) orelse return error.UnsupportedEqn;
+        const out_primal = try ctx.primal(op.result(0));
 
         // slope = y * (1 - y), the sigmoid derivative.
         const tensor = op.operand(0).as_tensor();
@@ -220,16 +220,16 @@ pub const logistic = struct {
         const one_minus = try ctx.builder.subtract(ones, out_primal);
         const slope = try ctx.builder.multiply(out_primal, one_minus);
         const contrib = try ctx.builder.multiply(out_cot, slope);
-        try ctx.add_cot(op.operand(0), contrib);
+        try ctx.add_cotangent(op.operand(0), contrib);
     }
 
     /// JVP: \(\mathrm{d}(\operatorname{sigmoid}(x)) =
     ///  \operatorname{sigmoid}(x)(1 - \operatorname{sigmoid}(x))\,\mathrm{d}x\).
-    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.JvpContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 1) return error.InvalidOpArity;
 
-        const dx = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
-        const out_primal = ctx.get_primal(op.result(0)) orelse return error.UnsupportedEqn;
+        const dx = try ctx.tangent_or_zero(op.operand(0));
+        const out_primal = try ctx.primal(op.result(0));
 
         const tensor = op.operand(0).as_tensor();
         const ones = try ctx.builder.scalar_broadcast(tensor.dtype, tensor.shape.dims, 1.0);

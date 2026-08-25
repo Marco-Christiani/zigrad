@@ -99,6 +99,23 @@ const ResidualCandidate = struct {
     linear_param: *pr.Var,
 };
 
+/// State for replaying primal operations into one derived function.
+const PrimalContext = struct {
+    builder: *pr.FunctionBuilder,
+    primals: []?*pr.Var,
+    allocator: std.mem.Allocator,
+
+    fn primal(self: PrimalContext, source: *const pr.Var) error{MissingPrimal}!*pr.Var {
+        std.debug.assert(source.id < self.primals.len);
+        return self.primals[source.id] orelse error.MissingPrimal;
+    }
+
+    fn set_primal(self: PrimalContext, source: *const pr.Var, value: *pr.Var) void {
+        std.debug.assert(source.id < self.primals.len);
+        self.primals[source.id] = value;
+    }
+};
+
 const GeneratedLinearization = struct {
     source: pr.FunctionId,
     linearization: Linearization,
@@ -255,18 +272,15 @@ fn linearize_impl(
         });
     }
 
-    const primal_ctx = ops.types.AdContext{
+    const primal_ctx = PrimalContext{
         .builder = &primal_builder,
-        .primal_map = primal_map,
-        .cot_map = null,
-        .tangent_map = null,
+        .primals = primal_map,
         .allocator = allocator,
     };
-    const linear_ctx = ops.types.AdContext{
+    const linear_ctx = ops.types.JvpContext{
         .builder = &linear_builder,
-        .primal_map = linear_primal_map,
-        .cot_map = null,
-        .tangent_map = tangent_map,
+        .primals = linear_primal_map,
+        .tangents = tangent_map,
         .allocator = allocator,
     };
 
@@ -282,8 +296,7 @@ fn linearize_impl(
             else => {
                 try replay_primal(primal_ctx, op);
                 for (op.outputs) |source_output| {
-                    const primal = primal_ctx.get_primal(source_output) orelse
-                        return error.UnsupportedEqn;
+                    const primal = try primal_ctx.primal(source_output);
                     const residual_param = try linear_builder.param_like(source_output.aval);
                     linear_ctx.set_primal(source_output, residual_param);
                     try residuals.append(allocator, .{
@@ -304,7 +317,7 @@ fn linearize_impl(
     defer allocator.free(linear_returns);
     var linear_return_count: usize = 0;
     for (func.returns, output_tangent_indices) |source_return, *tangent_index| {
-        if (linear_ctx.get_tangent(source_return)) |tangent| {
+        if (linear_ctx.tangent(source_return)) |tangent| {
             tangent_index.* = linear_return_count;
             linear_returns[linear_return_count] = tangent;
             linear_return_count += 1;
@@ -342,8 +355,7 @@ fn linearize_impl(
     );
     defer allocator.free(primal_returns);
     for (func.returns, primal_returns[0..func.returns.len]) |source_return, *output| {
-        output.* = primal_ctx.get_primal(source_return) orelse
-            return error.UnsupportedEqn;
+        output.* = try primal_ctx.primal(source_return);
     }
     residual_index = 0;
     for (residuals.items) |candidate| {
@@ -365,15 +377,15 @@ fn linearize_impl(
     };
 }
 
-fn replay_primal(ctx: ops.types.AdContext, op: *const pr.Op) AdError!void {
+fn replay_primal(ctx: PrimalContext, op: *const pr.Op) AdError!void {
     const inputs = try ctx.allocator.alloc(*pr.Var, op.inputs.len);
     defer ctx.allocator.free(inputs);
     for (op.inputs, inputs) |operand, *input| {
-        input.* = ctx.get_primal(operand.value) orelse return error.UnsupportedEqn;
+        input.* = try ctx.primal(operand.value);
     }
 
     const replayed = try ctx.builder.replay_op(op, inputs);
-    if (replayed.outputs.len != op.outputs.len) return error.UnsupportedEqn;
+    if (replayed.outputs.len != op.outputs.len) return error.InvalidLinearization;
     for (op.outputs, replayed.outputs) |source, output| ctx.set_primal(source, output);
 }
 
@@ -412,14 +424,14 @@ fn call_augmented_primal(
     const outputs = (try builder.call(linearization.augmented_primal, inputs)).outputs;
     if (outputs.len != augmented.returns.len or
         outputs.len != source.returns.len + linearization.residual_count)
-        return error.UnsupportedEqn;
+        return error.InvalidLinearization;
     return outputs;
 }
 
 fn linearize_call(
     traversal: *LinearizationTraversal,
-    primal_ctx: ops.types.AdContext,
-    linear_ctx: ops.types.AdContext,
+    primal_ctx: PrimalContext,
+    linear_ctx: ops.types.JvpContext,
     residuals: *std.ArrayList(ResidualCandidate),
     op: *const pr.Op,
 ) AdError!void {
@@ -431,8 +443,7 @@ fn linearize_call(
     const primal_inputs = try traversal.allocator.alloc(*pr.Var, op.inputs.len);
     defer traversal.allocator.free(primal_inputs);
     for (op.inputs, primal_inputs) |operand, *input| {
-        input.* = primal_ctx.get_primal(operand.value) orelse
-            return error.UnsupportedEqn;
+        input.* = try primal_ctx.primal(operand.value);
     }
     const primal_outputs = try call_augmented_primal(
         traversal.program,
@@ -457,7 +468,7 @@ fn linearize_call(
     var has_active_input = false;
     for (op.inputs) |operand| {
         if (ops.types.is_differentiable(operand.value.aval) and
-            linear_ctx.get_tangent(operand.value) != null)
+            linear_ctx.tangent(operand.value) != null)
         {
             has_active_input = true;
             break;
@@ -473,7 +484,7 @@ fn linearize_call(
     if (!has_active_input or !has_tangent_output) return;
 
     if (callee_linearization.input_tangent_indices.len != op.inputs.len)
-        return error.UnsupportedEqn;
+        return error.InvalidLinearization;
     var tangent_input_count: usize = 0;
     for (callee_linearization.input_tangent_indices) |index| {
         if (index != null) tangent_input_count += 1;
@@ -489,7 +500,7 @@ fn linearize_call(
     defer traversal.allocator.free(linear_inputs);
     for (op.inputs, callee_linearization.input_tangent_indices) |operand, tangent_index| {
         const index = tangent_index orelse continue;
-        if (index >= tangent_input_count) return error.UnsupportedEqn;
+        if (index >= tangent_input_count) return error.InvalidLinearization;
         linear_inputs[index] = try linear_ctx.tangent_or_zero(operand.value);
     }
     for (
@@ -510,7 +521,7 @@ fn linearize_call(
     )).outputs;
     for (op.outputs, callee_linearization.output_tangent_indices) |source_output, tangent_index| {
         const index = tangent_index orelse continue;
-        if (index >= tangent_outputs.len) return error.UnsupportedEqn;
+        if (index >= tangent_outputs.len) return error.InvalidLinearization;
         linear_ctx.set_tangent(source_output, tangent_outputs[index]);
     }
 }
@@ -613,7 +624,7 @@ fn alloc_differentiable_indices(
         for (indices) |index| {
             if (index >= values.len) return out_of_range;
             if (!ops.types.is_differentiable(values[index].aval))
-                return error.UnsupportedDType;
+                return error.NonDifferentiableSelection;
         }
         return try allocator.dupe(usize, indices);
     }
@@ -634,7 +645,8 @@ fn alloc_differentiable_indices(
 ///  transform replays primal operations required by the registered transpose
 ///  rules.
 ///
-/// Missing rules on active differentiable paths return `AdError.UnsupportedEqn`.
+/// Missing rules on active differentiable paths return
+///  `AdError.MissingDerivativeRule`.
 /// An input outside the selected output's dependency path has a zero
 ///  cotangent.
 /// TODO(ad): Make the built-in differentiable dtype set an explicit AD policy.
@@ -673,26 +685,31 @@ fn transpose_impl(
 
     for (of) |output_index| {
         const v = func.returns[output_index];
-        if (!ops.types.is_differentiable(v.aval)) return AdError.UnsupportedDType;
+        if (!ops.types.is_differentiable(v.aval))
+            return error.NonDifferentiableSelection;
         const new_seed = try b.param_like(v.aval);
-        if (cotangent_map[v.id] != null) {
-            cotangent_map[v.id] = try b.add(cotangent_map[v.id].?, new_seed);
+        if (cotangent_map[v.id]) |cotangent| {
+            cotangent_map[v.id] = try b.add(cotangent, new_seed);
         } else {
             cotangent_map[v.id] = new_seed;
         }
     }
 
-    const ad_ctx = ops.types.AdContext{
+    const ad_ctx = ops.types.VjpContext{
         .builder = &b,
-        .primal_map = primal_map,
-        .cot_map = cotangent_map,
-        .tangent_map = null,
+        .primals = primal_map,
+        .cotangents = cotangent_map,
+        .allocator = allocator,
+    };
+    const primal_ctx = PrimalContext{
+        .builder = &b,
+        .primals = primal_map,
         .allocator = allocator,
     };
 
     // Transpose rules may need primal values, so replay the linear function
     //  before propagating its selected output cotangents in reverse.
-    for (func.ops) |op| try replay_primal(ad_ctx, op);
+    for (func.ops) |op| try replay_primal(primal_ctx, op);
     var op_index: usize = func.ops.len;
     while (op_index > 0) {
         op_index -= 1;
@@ -732,14 +749,14 @@ fn transpose_impl(
 
 fn transpose_call(
     traversal: *TransposeTraversal,
-    ctx: ops.types.AdContext,
+    ctx: ops.types.VjpContext,
     op: *const pr.Op,
 ) AdError!void {
     const selected_outputs = try ctx.allocator.alloc(usize, op.outputs.len);
     defer ctx.allocator.free(selected_outputs);
     var selected_count: usize = 0;
     for (op.outputs, 0..) |output, index| {
-        if (ctx.get_cot(output) == null) continue;
+        if (ctx.cotangent(output) == null) continue;
         selected_outputs[selected_count] = index;
         selected_count += 1;
     }
@@ -753,21 +770,24 @@ fn transpose_call(
     const call_inputs = try ctx.allocator.alloc(*pr.Var, op.inputs.len + selected_count);
     defer ctx.allocator.free(call_inputs);
     for (op.inputs, call_inputs[0..op.inputs.len]) |operand, *input| {
-        input.* = ctx.get_primal(operand.value) orelse return error.UnsupportedEqn;
+        input.* = try ctx.primal(operand.value);
     }
     for (selected_outputs[0..selected_count], call_inputs[op.inputs.len..]) |index, *input| {
-        input.* = ctx.get_cot(op.outputs[index]).?;
+        input.* = ctx.cotangent(op.outputs[index]) orelse
+            return error.InvalidLinearization;
     }
 
     const input_cotangents = (try ctx.builder.call(transpose_id, call_inputs)).outputs;
     var cotangent_index: usize = 0;
     for (op.inputs) |operand| {
         if (!ops.types.is_differentiable(operand.value.aval)) continue;
-        if (cotangent_index >= input_cotangents.len) return error.UnsupportedEqn;
-        try ctx.add_cot(operand.value, input_cotangents[cotangent_index]);
+        if (cotangent_index >= input_cotangents.len)
+            return error.InvalidLinearization;
+        try ctx.add_cotangent(operand.value, input_cotangents[cotangent_index]);
         cotangent_index += 1;
     }
-    if (cotangent_index != input_cotangents.len) return error.UnsupportedEqn;
+    if (cotangent_index != input_cotangents.len)
+        return error.InvalidLinearization;
 }
 
 /// Reverse-mode AD applies the pullback of \(f: M \to N\):
@@ -855,7 +875,7 @@ pub fn vjp(
         defer allocator.free(tangent_wrt);
         for (selected_inputs, tangent_wrt) |source_index, *tangent_index| {
             tangent_index.* = result.input_tangent_indices[source_index] orelse
-                return error.UnsupportedDType;
+                return error.NonDifferentiableSelection;
         }
 
         const transpose_name_base = try std.fmt.allocPrint(allocator, "{s}_transpose", .{name});
@@ -901,16 +921,16 @@ pub fn vjp(
         const transpose_inputs = try allocator.alloc(*pr.Var, transpose.params.len);
         defer allocator.free(transpose_inputs);
         if (transpose_inputs.len != linear.params.len + selected_linear_count)
-            return error.UnsupportedEqn;
+            return error.InvalidLinearization;
         if (linear.params.len < result.residual_count)
-            return error.UnsupportedEqn;
+            return error.InvalidLinearization;
         const tangent_param_count = linear.params.len - result.residual_count;
 
         // The first linear inputs are tangent variables. Their primal values
         //  are zero because only residual coefficients affect the transpose.
         for (func.params, result.input_tangent_indices) |source_param, tangent_index| {
             const index = tangent_index orelse continue;
-            if (index >= tangent_param_count) return error.UnsupportedEqn;
+            if (index >= tangent_param_count) return error.InvalidLinearization;
             const tensor = source_param.as_tensor();
             transpose_inputs[index] = try builder.scalar_broadcast(
                 tensor.dtype,
@@ -930,7 +950,8 @@ pub fn vjp(
         }
         std.debug.assert(seed_index == selected_linear_count);
         const transpose_outputs = (try builder.call(callee, transpose_inputs)).outputs;
-        if (transpose_outputs.len != gradients.len) return error.UnsupportedEqn;
+        if (transpose_outputs.len != gradients.len)
+            return error.InvalidLinearization;
         @memcpy(gradients, transpose_outputs);
     } else {
         for (selected_inputs, gradients) |source_index, *gradient| {
@@ -1003,7 +1024,7 @@ pub fn jvp(
     const params = try allocator.alloc(*pr.Var, func.params.len);
     defer allocator.free(params);
     if (result.input_tangent_indices.len != func.params.len)
-        return error.UnsupportedEqn;
+        return error.InvalidLinearization;
     var tangent_count: usize = 0;
     for (result.input_tangent_indices) |index| {
         if (index != null) tangent_count += 1;
@@ -1015,7 +1036,7 @@ pub fn jvp(
     }
     for (func.params, result.input_tangent_indices) |source_param, tangent_index| {
         const index = tangent_index orelse continue;
-        if (index >= tangents.len) return error.UnsupportedEqn;
+        if (index >= tangents.len) return error.InvalidLinearization;
         tangents[index] = try builder.param_like(source_param.aval);
     }
 
@@ -1030,11 +1051,12 @@ pub fn jvp(
     const linear_inputs = try allocator.alloc(*pr.Var, linear.params.len);
     defer allocator.free(linear_inputs);
     if (linear_inputs.len != tangents.len + result.residual_count)
-        return error.UnsupportedEqn;
+        return error.InvalidLinearization;
     @memcpy(linear_inputs[0..tangents.len], tangents);
     @memcpy(linear_inputs[tangents.len..], primal_outputs[func.returns.len..]);
     const linear_outputs = (try builder.call(result.linear, linear_inputs)).outputs;
-    if (linear_outputs.len != linear.returns.len) return error.UnsupportedEqn;
+    if (linear_outputs.len != linear.returns.len)
+        return error.InvalidLinearization;
 
     const differentiable_outputs = try alloc_differentiable_indices(
         allocator,
@@ -1058,7 +1080,7 @@ pub fn jvp(
         const source_output = func.returns[source_index];
         const tangent_index = result.output_tangent_indices[source_index];
         outputs[output_index] = if (tangent_index) |index| tangent: {
-            if (index >= linear_outputs.len) return error.UnsupportedEqn;
+            if (index >= linear_outputs.len) return error.InvalidLinearization;
             break :tangent linear_outputs[index];
         } else zero: {
             const tensor = source_output.as_tensor();
@@ -1070,7 +1092,7 @@ pub fn jvp(
         };
         output_index += 1;
     }
-    if (output_index != outputs.len) return error.UnsupportedEqn;
+    if (output_index != outputs.len) return error.InvalidLinearization;
     return try program.add_function(try builder.finish(outputs));
 }
 
@@ -1314,7 +1336,7 @@ test "AD omits dual values for discrete parameters and results across calls" {
     try std.testing.expectEqual(@as(usize, 1), jvp_func.returns.len);
 
     try std.testing.expectError(
-        error.UnsupportedDType,
+        error.NonDifferentiableSelection,
         vjp(
             std.testing.allocator,
             &program,
@@ -1324,7 +1346,7 @@ test "AD omits dual values for discrete parameters and results across calls" {
         ),
     );
     try std.testing.expectError(
-        error.UnsupportedDType,
+        error.NonDifferentiableSelection,
         vjp(
             std.testing.allocator,
             &program,
@@ -1596,6 +1618,26 @@ test "vjp can include primals before gradients" {
     try pr.validate_ops_in_func(vjp_func);
 
     try std.testing.expectEqual(@as(usize, func.returns.len + func.params.len), vjp_func.returns.len);
+}
+
+test "vjp distinguishes an unsupported derivative configuration" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "strided_slice");
+    defer b.deinit();
+    const input = try b.param_tensor(.f32, &.{6});
+    const output = try b.slice(input, .{
+        .start_indices = &.{0},
+        .limit_indices = &.{6},
+        .strides = &.{2},
+    });
+    const source = try program.add_function(try b.finish(&.{output}));
+
+    try std.testing.expectError(
+        error.UnsupportedDerivative,
+        vjp(std.testing.allocator, &program, source, "strided_slice_vjp", .{}),
+    );
 }
 
 test "dot_general vjp supports 2 batch dims" {

@@ -39,33 +39,33 @@ pub const dot = struct {
         } } };
     }
 
-    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 2) return error.UnsupportedEqn;
+    pub fn vjp(ctx: types.VjpContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 2) return error.InvalidOpArity;
 
-        const out_cot = ctx.get_cot(op.result(0)) orelse return;
-        const lhs_primal = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const rhs_primal = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
+        const out_cot = ctx.cotangent(op.result(0)) orelse return;
+        const lhs_primal = try ctx.primal(op.operand(0));
+        const rhs_primal = try ctx.primal(op.operand(1));
 
         const shape = lhs_primal.as_tensor().shape.dims;
         const expanded = try ctx.builder.broadcast_in_dim(out_cot, shape, &.{});
         const lhs_contrib = try ctx.builder.multiply(expanded, rhs_primal);
         const rhs_contrib = try ctx.builder.multiply(expanded, lhs_primal);
 
-        try ctx.add_cot(op.operand(0), lhs_contrib);
-        try ctx.add_cot(op.operand(1), rhs_contrib);
+        try ctx.add_cotangent(op.operand(0), lhs_contrib);
+        try ctx.add_cotangent(op.operand(1), rhs_contrib);
     }
 
     /// JVP: \(\mathrm{d}(\operatorname{dot}(a, b)) =
     ///  \operatorname{dot}(\mathrm{d}a, b) + \operatorname{dot}(a, \mathrm{d}b)\).
-    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 2) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.JvpContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 2) return error.InvalidOpArity;
 
-        const a = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const b = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
-        if (ctx.get_tangent(op.operand(0))) |da| {
+        const a = try ctx.primal(op.operand(0));
+        const b = try ctx.primal(op.operand(1));
+        if (ctx.tangent(op.operand(0))) |da| {
             try ctx.add_tangent(op.result(0), try ctx.builder.dot(da, b));
         }
-        if (ctx.get_tangent(op.operand(1))) |db| {
+        if (ctx.tangent(op.operand(1))) |db| {
             try ctx.add_tangent(op.result(0), try ctx.builder.dot(a, db));
         }
     }
@@ -137,10 +137,10 @@ fn matrix_multiply(comptime batched: bool) type {
             return .{ .tensor = .{ .dtype = lhs.dtype, .shape = .{ .dims = dims } } };
         }
 
-        pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-            const out_cot = ctx.get_cot(op.result(0)) orelse return;
-            const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-            const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
+        pub fn vjp(ctx: types.VjpContext, op: *const pr.Op, _: void) types.AdError!void {
+            const out_cot = ctx.cotangent(op.result(0)) orelse return;
+            const lhs = try ctx.primal(op.operand(0));
+            const rhs = try ctx.primal(op.operand(1));
             var permutation: [pr.max_rank]i64 = undefined;
             const rank = lhs.as_tensor().shape.rank();
             for (0..rank) |index| permutation[index] = @intCast(index);
@@ -155,21 +155,21 @@ fn matrix_multiply(comptime batched: bool) type {
                 try ctx.builder.bmm(lhs_t, out_cot)
             else
                 try ctx.builder.mm(lhs_t, out_cot);
-            try ctx.add_cot(op.operand(0), lhs_contrib);
-            try ctx.add_cot(op.operand(1), rhs_contrib);
+            try ctx.add_cotangent(op.operand(0), lhs_contrib);
+            try ctx.add_cotangent(op.operand(1), rhs_contrib);
         }
 
-        pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-            const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-            const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
-            if (ctx.get_tangent(op.operand(0))) |lhs_tangent| {
+        pub fn jvp(ctx: types.JvpContext, op: *const pr.Op, _: void) types.AdError!void {
+            const lhs = try ctx.primal(op.operand(0));
+            const rhs = try ctx.primal(op.operand(1));
+            if (ctx.tangent(op.operand(0))) |lhs_tangent| {
                 const term = if (batched)
                     try ctx.builder.bmm(lhs_tangent, rhs)
                 else
                     try ctx.builder.mm(lhs_tangent, rhs);
                 try ctx.add_tangent(op.result(0), term);
             }
-            if (ctx.get_tangent(op.operand(1))) |rhs_tangent| {
+            if (ctx.tangent(op.operand(1))) |rhs_tangent| {
                 const term = if (batched)
                     try ctx.builder.bmm(lhs, rhs_tangent)
                 else
@@ -227,13 +227,13 @@ pub const convolution = struct {
         } };
     }
 
-    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, params: pr.ConvolutionParams) types.AdError!void {
-        const out_cot = ctx.get_cot(op.result(0)) orelse return;
-        if (params.feature_group_count != 1 or params.batch_group_count != 1) return error.UnsupportedEqn;
-        for (params.window_reversal) |reversed| if (reversed) return error.UnsupportedEqn;
+    pub fn vjp(ctx: types.VjpContext, op: *const pr.Op, params: pr.ConvolutionParams) types.AdError!void {
+        const out_cot = ctx.cotangent(op.result(0)) orelse return;
+        if (params.feature_group_count != 1 or params.batch_group_count != 1) return error.UnsupportedDerivative;
+        for (params.window_reversal) |reversed| if (reversed) return error.UnsupportedDerivative;
 
-        const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
+        const lhs = try ctx.primal(op.operand(0));
+        const rhs = try ctx.primal(op.operand(1));
         const lhs_shape = op.operand(0).as_tensor().shape.dims;
         const rhs_shape = op.operand(1).as_tensor().shape.dims;
         const out_shape = op.result(0).as_tensor().shape.dims;
@@ -295,20 +295,20 @@ pub const convolution = struct {
                 .output_spatial_dimensions = params.dimensions.kernel_spatial_dimensions,
             },
         });
-        try ctx.add_cot(op.operand(0), lhs_cot);
-        try ctx.add_cot(op.operand(1), rhs_cot);
+        try ctx.add_cotangent(op.operand(0), lhs_cot);
+        try ctx.add_cotangent(op.operand(1), rhs_cot);
     }
 
-    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, params: pr.ConvolutionParams) types.AdError!void {
-        const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
-        if (ctx.get_tangent(op.operand(0))) |lhs_tangent| {
+    pub fn jvp(ctx: types.JvpContext, op: *const pr.Op, params: pr.ConvolutionParams) types.AdError!void {
+        const lhs = try ctx.primal(op.operand(0));
+        const rhs = try ctx.primal(op.operand(1));
+        if (ctx.tangent(op.operand(0))) |lhs_tangent| {
             try ctx.add_tangent(
                 op.result(0),
                 try ctx.builder.convolution(lhs_tangent, rhs, params),
             );
         }
-        if (ctx.get_tangent(op.operand(1))) |rhs_tangent| {
+        if (ctx.tangent(op.operand(1))) |rhs_tangent| {
             try ctx.add_tangent(
                 op.result(0),
                 try ctx.builder.convolution(lhs, rhs_tangent, params),
@@ -382,12 +382,12 @@ pub const dot_general = struct {
     ///  3. Inline 3-rank special case: lhs is [B,M,K], rhs is [K,N] or [N,K],
     ///      no batch dims, single contracting dim at lhs position 2. Flattens
     ///      the batch and row dims to reduce to an `mm`, then reshapes back.
-    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, dg_params: pr.DotGeneralParams) types.AdError!void {
-        if (op.inputs.len != 2) return error.UnsupportedEqn;
+    pub fn vjp(ctx: types.VjpContext, op: *const pr.Op, dg_params: pr.DotGeneralParams) types.AdError!void {
+        if (op.inputs.len != 2) return error.InvalidOpArity;
 
-        const out_cot = ctx.get_cot(op.result(0)) orelse return;
-        const lhs_primal = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const rhs_primal = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
+        const out_cot = ctx.cotangent(op.result(0)) orelse return;
+        const lhs_primal = try ctx.primal(op.operand(0));
+        const rhs_primal = try ctx.primal(op.operand(1));
 
         const lhs_contrib, const rhs_contrib = blk: {
             if (try maybe_batched_matmul_vjp(ctx, op.operand(0), op.operand(1), out_cot, lhs_primal, rhs_primal, dg_params)) |pair| {
@@ -411,7 +411,7 @@ pub const dot_general = struct {
                 const out_t = op.result(0).as_tensor();
 
                 if (lhs_t.shape.rank() != 3 or rhs_t.shape.rank() != 2 or out_t.shape.rank() != 3) {
-                    return error.UnsupportedEqn;
+                    return error.UnsupportedDerivative;
                 }
 
                 const b = out_t.shape.dims[0];
@@ -452,25 +452,25 @@ pub const dot_general = struct {
                 break :blk .{ lhs_c, rhs_c };
             }
 
-            return error.UnsupportedEqn;
+            return error.UnsupportedDerivative;
         };
 
-        try ctx.add_cot(op.operand(0), lhs_contrib);
-        try ctx.add_cot(op.operand(1), rhs_contrib);
+        try ctx.add_cotangent(op.operand(0), lhs_contrib);
+        try ctx.add_cotangent(op.operand(1), rhs_contrib);
     }
 
     /// JVP: \(\mathrm{d}(\operatorname{dot\_general}(A, B, p)) =
     ///  \operatorname{dot\_general}(\mathrm{d}A, B, p) +
     ///  \operatorname{dot\_general}(A, \mathrm{d}B, p)\).
-    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, dg_params: pr.DotGeneralParams) types.AdError!void {
-        if (op.inputs.len != 2) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.JvpContext, op: *const pr.Op, dg_params: pr.DotGeneralParams) types.AdError!void {
+        if (op.inputs.len != 2) return error.InvalidOpArity;
 
-        const a = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const b = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
-        if (ctx.get_tangent(op.operand(0))) |da| {
+        const a = try ctx.primal(op.operand(0));
+        const b = try ctx.primal(op.operand(1));
+        if (ctx.tangent(op.operand(0))) |da| {
             try ctx.add_tangent(op.result(0), try ctx.builder.dot_general(da, b, dg_params));
         }
-        if (ctx.get_tangent(op.operand(1))) |db| {
+        if (ctx.tangent(op.operand(1))) |db| {
             try ctx.add_tangent(op.result(0), try ctx.builder.dot_general(a, db, dg_params));
         }
     }
@@ -502,7 +502,7 @@ const BatchedMatmulVjpPair = struct { lhs: *pr.Var, rhs: *pr.Var };
 ///  batch/contracting counts or zero contracting dims), letting the caller fall
 ///  through to more specialized strategies.
 fn maybe_general_dot_vjp(
-    ctx: types.AdContext,
+    ctx: types.VjpContext,
     lhs_var: *const pr.Var,
     rhs_var: *const pr.Var,
     out_cot: *pr.Var,
@@ -530,7 +530,7 @@ fn maybe_general_dot_vjp(
     defer ctx.allocator.free(rhs_other);
 
     const expected_out_rank = batch_len + lhs_other.len + rhs_other.len;
-    if (out_t.shape.rank() != expected_out_rank) return error.UnsupportedEqn;
+    if (out_t.shape.rank() != expected_out_rank) return error.UnsupportedDerivative;
 
     // Output dim ranges: [0..batch_len) are batch, [batch_len..+lhs_other) are lhs free,
     // [batch_len+lhs_other..end) are rhs free.
@@ -600,7 +600,7 @@ fn maybe_general_dot_vjp(
 /// Returns null if preconditions aren't met (no batch dims, multiple
 ///  contracting dims, or more than one free dim per operand).
 fn maybe_batched_matmul_vjp(
-    ctx: types.AdContext,
+    ctx: types.VjpContext,
     lhs_var: *const pr.Var,
     rhs_var: *const pr.Var,
     out_cot: *pr.Var,
@@ -632,7 +632,7 @@ fn maybe_batched_matmul_vjp(
     const out_n_dim: i64 = @intCast(batch_len + 1);
 
     var out_batch_buf: [8]i64 = undefined;
-    if (batch_len > out_batch_buf.len) return error.UnsupportedEqn;
+    if (batch_len > out_batch_buf.len) return error.UnsupportedDerivative;
     for (0..batch_len) |i| out_batch_buf[i] = @intCast(i);
     const out_batch = out_batch_buf[0..batch_len];
 
@@ -722,7 +722,7 @@ fn transpose_to_match(
     batch_len: usize,
 ) types.AdError!*pr.Var {
     var perm_buf: [8]i64 = undefined;
-    if (rank > perm_buf.len) return error.UnsupportedEqn;
+    if (rank > perm_buf.len) return error.UnsupportedDerivative;
 
     // For each target dim d, find where it sits in the canonical layout:
     //   batch dims : positions [0..batch_len)
@@ -734,7 +734,7 @@ fn transpose_to_match(
         const dim_i64: i64 = @intCast(d);
         const src: i64 = if (index_of_i64(batch_dims, dim_i64)) |bi| blk: {
             break :blk @intCast(bi);
-        } else if (dim_i64 == a_dim) @intCast(batch_len) else if (dim_i64 == b_dim) @intCast(batch_len + 1) else return error.UnsupportedEqn;
+        } else if (dim_i64 == a_dim) @intCast(batch_len) else if (dim_i64 == b_dim) @intCast(batch_len + 1) else return error.UnsupportedDerivative;
         perm_buf[d] = src;
         if (src != dim_i64) is_identity = false;
     }
@@ -748,7 +748,7 @@ fn transpose_to_match(
 ///  layout by looking up each target dimension in the batch, other, and
 ///  contracting sets. Skips the transpose if the permutation is identity.
 fn transpose_to_match_multi(
-    ctx: types.AdContext,
+    ctx: types.VjpContext,
     canon: *pr.Var,
     rank: usize,
     batch_dims: []const i64,
@@ -774,7 +774,7 @@ fn transpose_to_match_multi(
             break :blk @intCast(batch_dims.len + oi);
         } else if (index_of_i64(contract_dims, dim_i64)) |ci| blk: {
             break :blk @intCast(batch_dims.len + other_dims.len + ci);
-        } else return error.UnsupportedEqn;
+        } else return error.UnsupportedDerivative;
         perm[d] = src;
         if (src != dim_i64) is_identity = false;
     }

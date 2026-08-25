@@ -50,22 +50,22 @@ pub const reshape = struct {
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = rp.out_shape } } };
     }
 
-    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: pr.ReshapeParams) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
+    pub fn vjp(ctx: types.VjpContext, op: *const pr.Op, _: pr.ReshapeParams) types.AdError!void {
+        if (op.inputs.len != 1) return error.InvalidOpArity;
 
-        const out_cot = ctx.get_cot(op.result(0)) orelse return;
+        const out_cot = ctx.cotangent(op.result(0)) orelse return;
         const operand_tensor = op.operand(0).as_tensor();
 
         const contrib = try ctx.builder.reshape(out_cot, operand_tensor.shape.dims);
-        try ctx.add_cot(op.operand(0), contrib);
+        try ctx.add_cotangent(op.operand(0), contrib);
     }
 
     /// JVP: \(\mathrm{d}(\operatorname{reshape}(x, s)) =
     ///  \operatorname{reshape}(\mathrm{d}x, s)\).
-    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: pr.ReshapeParams) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.JvpContext, op: *const pr.Op, _: pr.ReshapeParams) types.AdError!void {
+        if (op.inputs.len != 1) return error.InvalidOpArity;
 
-        const dx = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
+        const dx = try ctx.tangent_or_zero(op.operand(0));
         const out_tensor = op.result(0).as_tensor();
         ctx.set_tangent(op.result(0), try ctx.builder.reshape(dx, out_tensor.shape.dims));
     }
@@ -153,10 +153,10 @@ pub const transpose = struct {
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
     }
 
-    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, tp: pr.TransposeParams) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
+    pub fn vjp(ctx: types.VjpContext, op: *const pr.Op, tp: pr.TransposeParams) types.AdError!void {
+        if (op.inputs.len != 1) return error.InvalidOpArity;
 
-        const out_cot = ctx.get_cot(op.result(0)) orelse return;
+        const out_cot = ctx.cotangent(op.result(0)) orelse return;
 
         // Inverse permutation
         const inv = try ctx.allocator.alloc(i64, tp.permutation.len);
@@ -164,15 +164,15 @@ pub const transpose = struct {
         for (tp.permutation, 0..) |p, i| inv[@intCast(p)] = @intCast(i);
 
         const contrib = try ctx.builder.transpose(out_cot, inv);
-        try ctx.add_cot(op.operand(0), contrib);
+        try ctx.add_cotangent(op.operand(0), contrib);
     }
 
     /// JVP: \(\mathrm{d}(\operatorname{transpose}(x, \mathrm{perm})) =
     ///  \operatorname{transpose}(\mathrm{d}x, \mathrm{perm})\).
-    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, tp: pr.TransposeParams) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.JvpContext, op: *const pr.Op, tp: pr.TransposeParams) types.AdError!void {
+        if (op.inputs.len != 1) return error.InvalidOpArity;
 
-        const dx = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
+        const dx = try ctx.tangent_or_zero(op.operand(0));
         ctx.set_tangent(op.result(0), try ctx.builder.transpose(dx, tp.permutation));
     }
 
@@ -207,10 +207,10 @@ pub const slice = struct {
 
     /// JVP: \(\mathrm{d}(\operatorname{slice}(x, p)) =
     ///  \operatorname{slice}(\mathrm{d}x, p)\).
-    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, sparams: pr.SliceParams) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.JvpContext, op: *const pr.Op, sparams: pr.SliceParams) types.AdError!void {
+        if (op.inputs.len != 1) return error.InvalidOpArity;
 
-        const dx = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
+        const dx = try ctx.tangent_or_zero(op.operand(0));
         ctx.set_tangent(op.result(0), try ctx.builder.slice(dx, sparams));
     }
 
@@ -218,14 +218,14 @@ pub const slice = struct {
     /// zero-padding the slice cotangent back to the original shape. For each
     /// axis, prepends `start` zeros and appends `input_dim - limit` zeros via
     /// concatenation. Only supports unit strides.
-    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, sparams: pr.SliceParams) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
+    pub fn vjp(ctx: types.VjpContext, op: *const pr.Op, sparams: pr.SliceParams) types.AdError!void {
+        if (op.inputs.len != 1) return error.InvalidOpArity;
 
-        const out_cot = ctx.get_cot(op.result(0)) orelse return;
+        const out_cot = ctx.cotangent(op.result(0)) orelse return;
         const in_tensor = op.operand(0).as_tensor();
 
         for (sparams.strides) |s| {
-            if (s != 1) return error.UnsupportedEqn;
+            if (s != 1) return error.UnsupportedDerivative;
         }
 
         // Build the full input cotangent by padding each axis with zeros.
@@ -238,7 +238,7 @@ pub const slice = struct {
         while (axis < in_tensor.shape.rank()) : (axis += 1) {
             const start = sparams.start_indices[axis];
             const limit = sparams.limit_indices[axis];
-            if (start < 0 or limit < 0) return error.UnsupportedEqn;
+            if (start < 0 or limit < 0) return error.UnsupportedDerivative;
             const pre: i64 = start; // zeros before the slice
             const post: i64 = in_tensor.shape.dims[axis] - limit; // zeros after the slice
 
@@ -263,7 +263,7 @@ pub const slice = struct {
             }
         }
 
-        try ctx.add_cot(op.operand(0), cur);
+        try ctx.add_cotangent(op.operand(0), cur);
     }
 };
 
@@ -289,8 +289,8 @@ pub const concatenate = struct {
 
     /// JVP: \(\mathrm{d}(\operatorname{concatenate}(x_s, \mathrm{axis})) =
     ///  \operatorname{concatenate}(\mathrm{d}x_s, \mathrm{axis})\).
-    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, cp: pr.ConcatenateParams) types.AdError!void {
-        if (op.inputs.len == 0) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.JvpContext, op: *const pr.Op, cp: pr.ConcatenateParams) types.AdError!void {
+        if (op.inputs.len == 0) return error.InvalidOpArity;
 
         var tangents = try ctx.allocator.alloc(*pr.Var, op.inputs.len);
         defer ctx.allocator.free(tangents);
@@ -303,10 +303,10 @@ pub const concatenate = struct {
     /// VJP backward for concatenate. Slices the concatenated cotangent back
     /// into per-input contributions. Tracks a running offset along the concat
     /// axis and extracts each input's slice at [offset, offset+len).
-    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, cp: pr.ConcatenateParams) types.AdError!void {
-        if (op.inputs.len == 0) return error.UnsupportedEqn;
+    pub fn vjp(ctx: types.VjpContext, op: *const pr.Op, cp: pr.ConcatenateParams) types.AdError!void {
+        if (op.inputs.len == 0) return error.InvalidOpArity;
 
-        const out_cot = ctx.get_cot(op.result(0)) orelse return;
+        const out_cot = ctx.cotangent(op.result(0)) orelse return;
         const axis_u: usize = @intCast(cp.axis);
 
         // Walk the concat axis, extracting each input's slice from the cotangent.
@@ -340,7 +340,7 @@ pub const concatenate = struct {
                 .limit_indices = limit_indices,
                 .strides = strides,
             });
-            try ctx.add_cot(operand.value, slice_out);
+            try ctx.add_cotangent(operand.value, slice_out);
             offset += len;
         }
     }
@@ -368,19 +368,19 @@ pub const reduce = struct {
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
     }
 
-    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.JvpContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
+        if (op.inputs.len != 1) return error.InvalidOpArity;
         switch (rp.operation) {
             .sum => {
-                const dx = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
+                const dx = try ctx.tangent_or_zero(op.operand(0));
                 ctx.set_tangent(op.result(0), try ctx.builder.reduce(dx, rp));
             },
             .maximum => try maximum_jvp(ctx, op, rp),
         }
     }
 
-    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
+    pub fn vjp(ctx: types.VjpContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
+        if (op.inputs.len != 1) return error.InvalidOpArity;
         switch (rp.operation) {
             .sum => try sum_vjp(ctx, op, rp),
             .maximum => try maximum_vjp(ctx, op, rp),
@@ -397,10 +397,10 @@ pub const reduce = struct {
     }
 };
 
-fn maximum_jvp(ctx: types.AdContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
-    const dx = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
-    const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-    const out_primal = ctx.get_primal(op.result(0)) orelse return error.UnsupportedEqn;
+fn maximum_jvp(ctx: types.JvpContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
+    const dx = try ctx.tangent_or_zero(op.operand(0));
+    const operand = try ctx.primal(op.operand(0));
+    const out_primal = try ctx.primal(op.result(0));
     const in_tensor = op.operand(0).as_tensor();
 
     const bd = try reduce_broadcast_dims(ctx.allocator, in_tensor.shape.dims.len, rp.axes);
@@ -420,21 +420,21 @@ fn maximum_jvp(ctx: types.AdContext, op: *const pr.Op, rp: pr.ReduceParams) type
     }));
 }
 
-fn maximum_vjp(ctx: types.AdContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
-    const out_cot = ctx.get_cot(op.result(0)) orelse return;
+fn maximum_vjp(ctx: types.VjpContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
+    const out_cot = ctx.cotangent(op.result(0)) orelse return;
     const in_tensor = op.operand(0).as_tensor();
 
     const bd = try reduce_broadcast_dims(ctx.allocator, in_tensor.shape.dims.len, rp.axes);
     defer ctx.allocator.free(bd);
 
     // Broadcast the reduced max and cotangent back to the full input shape.
-    const out_primal = ctx.get_primal(op.result(0)) orelse return error.UnsupportedEqn;
+    const out_primal = try ctx.primal(op.result(0));
     const max_b = try ctx.builder.broadcast_in_dim(out_primal, in_tensor.shape.dims, bd);
     const out_cot_b = try ctx.builder.broadcast_in_dim(out_cot, in_tensor.shape.dims, bd);
 
     // Build a boolean mask: true where input == max (these positions contributed to the max).
     const cmp_type = compare_type_for_dtype(in_tensor.dtype);
-    const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+    const operand = try ctx.primal(op.operand(0));
     const mask = try ctx.builder.compare(operand, max_b, .{
         .direction = .EQ,
         .compare_type = cmp_type,
@@ -443,11 +443,11 @@ fn maximum_vjp(ctx: types.AdContext, op: *const pr.Op, rp: pr.ReduceParams) type
     // Positions not equal to max get zero cotangent.
     const mask_f = try ctx.builder.convert(mask, in_tensor.dtype);
     const contrib = try ctx.builder.multiply(out_cot_b, mask_f);
-    try ctx.add_cot(op.operand(0), contrib);
+    try ctx.add_cotangent(op.operand(0), contrib);
 }
 
-fn sum_vjp(ctx: types.AdContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
-    const out_cot = ctx.get_cot(op.result(0)) orelse return;
+fn sum_vjp(ctx: types.VjpContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
+    const out_cot = ctx.cotangent(op.result(0)) orelse return;
     const in_tensor = op.operand(0).as_tensor();
     const dimensions = try reduce_broadcast_dims(ctx.allocator, in_tensor.shape.dims.len, rp.axes);
     defer ctx.allocator.free(dimensions);
@@ -456,7 +456,7 @@ fn sum_vjp(ctx: types.AdContext, op: *const pr.Op, rp: pr.ReduceParams) types.Ad
         in_tensor.shape.dims,
         dimensions,
     );
-    try ctx.add_cot(op.operand(0), contribution);
+    try ctx.add_cotangent(op.operand(0), contribution);
 }
 
 // Gather
@@ -517,11 +517,11 @@ pub const gather = struct {
 
     /// JVP: \(\mathrm{d}(\operatorname{gather}(x, \mathrm{idx}, p)) =
     ///  \operatorname{gather}(\mathrm{d}x, \mathrm{idx}, p)\).
-    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, gparams: pr.GatherParams) types.AdError!void {
-        if (op.inputs.len != 2) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.JvpContext, op: *const pr.Op, gparams: pr.GatherParams) types.AdError!void {
+        if (op.inputs.len != 2) return error.InvalidOpArity;
 
-        const dx = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
-        const indices = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
+        const dx = try ctx.tangent_or_zero(op.operand(0));
+        const indices = try ctx.primal(op.operand(1));
         ctx.set_tangent(op.result(0), try ctx.builder.gather(dx, indices, gparams));
     }
 
@@ -529,11 +529,11 @@ pub const gather = struct {
     ///
     /// Inverts the gather by scatter-adding the output cotangent into a zero
     ///  tensor of the original operand shape.
-    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, gparams: pr.GatherParams) types.AdError!void {
-        if (op.inputs.len != 2) return error.UnsupportedEqn;
+    pub fn vjp(ctx: types.VjpContext, op: *const pr.Op, gparams: pr.GatherParams) types.AdError!void {
+        if (op.inputs.len != 2) return error.InvalidOpArity;
 
-        const out_cot = ctx.get_cot(op.result(0)) orelse return;
-        const indices = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
+        const out_cot = ctx.cotangent(op.result(0)) orelse return;
+        const indices = try ctx.primal(op.operand(1));
         const operand_tensor = op.operand(0).as_tensor();
 
         // zero tensor matching the original operand shape
@@ -544,7 +544,7 @@ pub const gather = struct {
         // scatter_params_for_gather inverts the gather dimension mapping
         const sparams = scatter_params_for_gather(gparams);
         const contrib = try ctx.builder.scatter(zero_full, indices, out_cot, sparams);
-        try ctx.add_cot(op.operand(0), contrib);
+        try ctx.add_cotangent(op.operand(0), contrib);
     }
 };
 
@@ -603,10 +603,10 @@ pub const broadcast_in_dim = struct {
 
     /// JVP: \(\mathrm{d}(\operatorname{broadcast\_in\_dim}(x, s, \mathrm{bd})) =
     ///  \operatorname{broadcast\_in\_dim}(\mathrm{d}x, s, \mathrm{bd})\).
-    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, bp: pr.BroadcastInDimParams) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.JvpContext, op: *const pr.Op, bp: pr.BroadcastInDimParams) types.AdError!void {
+        if (op.inputs.len != 1) return error.InvalidOpArity;
 
-        const dx = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
+        const dx = try ctx.tangent_or_zero(op.operand(0));
         ctx.set_tangent(op.result(0), try ctx.builder.broadcast_in_dim(dx, bp.out_shape, bp.dimensions));
     }
 
@@ -616,10 +616,10 @@ pub const broadcast_in_dim = struct {
     ///  (size-1 -> size-N, or newly introduced).
     /// After reduction, reshapes to match the original input shape if the reduced shape differs
     ///  (e.g. when size-1 dims remain).
-    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, bp: pr.BroadcastInDimParams) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
+    pub fn vjp(ctx: types.VjpContext, op: *const pr.Op, bp: pr.BroadcastInDimParams) types.AdError!void {
+        if (op.inputs.len != 1) return error.InvalidOpArity;
 
-        const out_cot = ctx.get_cot(op.result(0)) orelse return;
+        const out_cot = ctx.cotangent(op.result(0)) orelse return;
         const in_tensor = op.operand(0).as_tensor();
         const out_tensor = op.result(0).as_tensor();
 
@@ -642,7 +642,7 @@ pub const broadcast_in_dim = struct {
             contrib = try ctx.builder.reshape(contrib, in_tensor.shape.dims);
         }
 
-        try ctx.add_cot(op.operand(0), contrib);
+        try ctx.add_cotangent(op.operand(0), contrib);
     }
 
     pub fn format(writer: *types.Writer, op: *const pr.Op, bp: pr.BroadcastInDimParams) types.FormatError!void {

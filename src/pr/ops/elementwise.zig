@@ -44,20 +44,20 @@ pub const add = struct {
         return try infer_binary_elementwise(error.AddTypeMismatch, inputs);
     }
 
-    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 2) return error.UnsupportedEqn;
+    pub fn vjp(ctx: types.VjpContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 2) return error.InvalidOpArity;
 
-        const out_cot = ctx.get_cot(op.result(0)) orelse return;
-        try ctx.add_cot(op.operand(0), out_cot);
-        try ctx.add_cot(op.operand(1), out_cot);
+        const out_cot = ctx.cotangent(op.result(0)) orelse return;
+        try ctx.add_cotangent(op.operand(0), out_cot);
+        try ctx.add_cotangent(op.operand(1), out_cot);
     }
 
     /// JVP: \(\mathrm{d}(x + y) = \mathrm{d}x + \mathrm{d}y\).
-    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 2) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.JvpContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 2) return error.InvalidOpArity;
 
-        const dx = ctx.get_tangent(op.operand(0));
-        const dy = ctx.get_tangent(op.operand(1));
+        const dx = ctx.tangent(op.operand(0));
+        const dy = ctx.tangent(op.operand(1));
         if (dx) |value| try ctx.add_tangent(op.result(0), value);
         if (dy) |value| try ctx.add_tangent(op.result(0), value);
     }
@@ -78,23 +78,23 @@ pub const subtract = struct {
         return try infer_binary_elementwise(error.SubtractTypeMismatch, inputs);
     }
 
-    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 2) return error.UnsupportedEqn;
+    pub fn vjp(ctx: types.VjpContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 2) return error.InvalidOpArity;
 
-        const out_cot = ctx.get_cot(op.result(0)) orelse return;
+        const out_cot = ctx.cotangent(op.result(0)) orelse return;
         const rhs_tensor = op.operand(1).as_tensor();
 
-        try ctx.add_cot(op.operand(0), out_cot);
+        try ctx.add_cotangent(op.operand(0), out_cot);
         const neg = try negate_like(ctx.builder, rhs_tensor, out_cot);
-        try ctx.add_cot(op.operand(1), neg);
+        try ctx.add_cotangent(op.operand(1), neg);
     }
 
     /// JVP: \(\mathrm{d}(x - y) = \mathrm{d}x - \mathrm{d}y\).
-    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 2) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.JvpContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 2) return error.InvalidOpArity;
 
-        const dx = ctx.get_tangent(op.operand(0));
-        const dy = ctx.get_tangent(op.operand(1));
+        const dx = ctx.tangent(op.operand(0));
+        const dy = ctx.tangent(op.operand(1));
         if (dx) |value| try ctx.add_tangent(op.result(0), value);
         if (dy) |value| {
             const negated = try negate_like(ctx.builder, op.operand(1).as_tensor(), value);
@@ -118,30 +118,30 @@ pub const multiply = struct {
         return try infer_binary_elementwise(error.MultiplyTypeMismatch, inputs);
     }
 
-    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 2) return error.UnsupportedEqn;
+    pub fn vjp(ctx: types.VjpContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 2) return error.InvalidOpArity;
 
-        const out_cot = ctx.get_cot(op.result(0)) orelse return;
-        const lhs_primal = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const rhs_primal = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
+        const out_cot = ctx.cotangent(op.result(0)) orelse return;
+        const lhs_primal = try ctx.primal(op.operand(0));
+        const rhs_primal = try ctx.primal(op.operand(1));
 
         const lhs_contrib = try ctx.builder.multiply(out_cot, rhs_primal);
         const rhs_contrib = try ctx.builder.multiply(out_cot, lhs_primal);
 
-        try ctx.add_cot(op.operand(0), lhs_contrib);
-        try ctx.add_cot(op.operand(1), rhs_contrib);
+        try ctx.add_cotangent(op.operand(0), lhs_contrib);
+        try ctx.add_cotangent(op.operand(1), rhs_contrib);
     }
 
     /// JVP: \(\mathrm{d}(x y) = (\mathrm{d}x) y + x (\mathrm{d}y)\) (product rule).
-    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 2) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.JvpContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 2) return error.InvalidOpArity;
 
-        const x = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const y = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
-        if (ctx.get_tangent(op.operand(0))) |dx| {
+        const x = try ctx.primal(op.operand(0));
+        const y = try ctx.primal(op.operand(1));
+        if (ctx.tangent(op.operand(0))) |dx| {
             try ctx.add_tangent(op.result(0), try ctx.builder.multiply(dx, y));
         }
-        if (ctx.get_tangent(op.operand(1))) |dy| {
+        if (ctx.tangent(op.operand(1))) |dy| {
             try ctx.add_tangent(op.result(0), try ctx.builder.multiply(x, dy));
         }
     }
@@ -166,16 +166,16 @@ pub const divide = struct {
     ///  \frac{\mathrm{dout}}{\mathrm{rhs}}\) and
     /// \(\mathrm{d}_{\mathrm{rhs}}(\mathrm{lhs}/\mathrm{rhs}) =
     ///  -\frac{\mathrm{dout}\,\mathrm{lhs}}{\mathrm{rhs}^2}\) (quotient rule).
-    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 2) return error.UnsupportedEqn;
+    pub fn vjp(ctx: types.VjpContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 2) return error.InvalidOpArity;
 
-        const out_cot = ctx.get_cot(op.result(0)) orelse return;
-        const lhs_primal = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const rhs_primal = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
+        const out_cot = ctx.cotangent(op.result(0)) orelse return;
+        const lhs_primal = try ctx.primal(op.operand(0));
+        const rhs_primal = try ctx.primal(op.operand(1));
 
         // d_lhs = dout / rhs
         const lhs_contrib = try ctx.builder.divide(out_cot, rhs_primal);
-        try ctx.add_cot(op.operand(0), lhs_contrib);
+        try ctx.add_cotangent(op.operand(0), lhs_contrib);
 
         // d_rhs = -dout * lhs / rhs^2
         const rhs_sq = try ctx.builder.multiply(rhs_primal, rhs_primal);
@@ -183,20 +183,20 @@ pub const divide = struct {
         const rhs_contrib = try ctx.builder.multiply(out_cot, lhs_over_rhs_sq);
         const rhs_tensor = op.operand(1).as_tensor();
         const neg = try negate_like(ctx.builder, rhs_tensor, rhs_contrib);
-        try ctx.add_cot(op.operand(1), neg);
+        try ctx.add_cotangent(op.operand(1), neg);
     }
 
     /// JVP: \(\mathrm{d}(x/y) = \frac{\mathrm{d}x}{y} -
     ///  \frac{x\,\mathrm{d}y}{y^2}\) (quotient rule).
-    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 2) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.JvpContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 2) return error.InvalidOpArity;
 
-        const x = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const y = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
-        if (ctx.get_tangent(op.operand(0))) |dx| {
+        const x = try ctx.primal(op.operand(0));
+        const y = try ctx.primal(op.operand(1));
+        if (ctx.tangent(op.operand(0))) |dx| {
             try ctx.add_tangent(op.result(0), try ctx.builder.divide(dx, y));
         }
-        if (ctx.get_tangent(op.operand(1))) |dy| {
+        if (ctx.tangent(op.operand(1))) |dy| {
             const y_sq = try ctx.builder.multiply(y, y);
             const x_dy = try ctx.builder.multiply(x, dy);
             const term = try ctx.builder.divide(x_dy, y_sq);
@@ -223,12 +223,12 @@ pub const maximum = struct {
 
     /// VJP: gradient routes to whichever operand was selected.
     ///  d_lhs = select(lhs >= rhs, cot, 0), d_rhs = select(lhs >= rhs, 0, cot).
-    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 2) return error.UnsupportedEqn;
+    pub fn vjp(ctx: types.VjpContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 2) return error.InvalidOpArity;
 
-        const out_cot = ctx.get_cot(op.result(0)) orelse return;
-        const lhs_primal = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const rhs_primal = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
+        const out_cot = ctx.cotangent(op.result(0)) orelse return;
+        const lhs_primal = try ctx.primal(op.operand(0));
+        const rhs_primal = try ctx.primal(op.operand(1));
 
         const lhs_tensor = op.operand(0).as_tensor();
         const cmp = try ctx.builder.compare(lhs_primal, rhs_primal, .{
@@ -237,16 +237,16 @@ pub const maximum = struct {
         });
         const zero = try ctx.zero_like(lhs_tensor);
 
-        try ctx.add_cot(op.operand(0), try ctx.builder.select(cmp, out_cot, zero));
-        try ctx.add_cot(op.operand(1), try ctx.builder.select(cmp, zero, out_cot));
+        try ctx.add_cotangent(op.operand(0), try ctx.builder.select(cmp, out_cot, zero));
+        try ctx.add_cotangent(op.operand(1), try ctx.builder.select(cmp, zero, out_cot));
     }
 
     /// JVP: route the tangent through the selected operand, with ties using `lhs`.
-    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 2) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.JvpContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 2) return error.InvalidOpArity;
 
-        const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
+        const lhs = try ctx.primal(op.operand(0));
+        const rhs = try ctx.primal(op.operand(1));
         const lhs_tangent = try ctx.tangent_or_zero(op.operand(0));
         const rhs_tangent = try ctx.tangent_or_zero(op.operand(1));
         const select_lhs = try ctx.builder.compare(lhs, rhs, .{

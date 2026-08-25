@@ -500,10 +500,10 @@ test "value_and_grad restores registered functions after failure" {
     defer builder.deinit();
     const input = try Tensor.param(&builder, .f32, &.{});
 
-    try std.testing.expectError(error.UnsupportedEqn, value_and_grad(unsupported_loss, .{input}, .{}));
+    try std.testing.expectError(error.MissingDerivativeRule, value_and_grad(unsupported_loss, .{input}, .{}));
     try std.testing.expectEqual(@as(usize, 0), program.functions().len);
     try std.testing.expectEqual(@as(usize, 0), program.checkpoint_appends().reservation_count);
-    try std.testing.expectError(error.UnsupportedEqn, value_and_grad(unsupported_loss, .{input}, .{}));
+    try std.testing.expectError(error.MissingDerivativeRule, value_and_grad(unsupported_loss, .{input}, .{}));
     try std.testing.expectEqual(@as(usize, 0), program.functions().len);
     try std.testing.expectEqual(@as(usize, 0), program.checkpoint_appends().reservation_count);
 }

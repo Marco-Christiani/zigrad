@@ -181,8 +181,8 @@ pub fn has_local_vjp(prim: pr.Prim) bool {
     };
 }
 
-/// Execute VJP backward pass for an op.
-pub fn vjp(ctx: types.AdContext, op: *const pr.Op) types.AdError!void {
+/// Apply a local VJP rule to an operation.
+pub fn vjp(ctx: types.VjpContext, op: *const pr.Op) types.AdError!void {
     switch (op.params) {
         inline else => |typed_params, tag| {
             const Handler = OpFor(tag);
@@ -191,17 +191,17 @@ pub fn vjp(ctx: types.AdContext, op: *const pr.Op) types.AdError!void {
             }
             if (requires_vjp(ctx, op)) {
                 if (!@import("builtin").is_test) log.err("{s} has no local VJP rule", .{@tagName(tag)});
-                return error.UnsupportedEqn;
+                return error.MissingDerivativeRule;
             }
             return;
         },
     }
 }
 
-fn requires_vjp(ctx: types.AdContext, op: *const pr.Op) bool {
+fn requires_vjp(ctx: types.VjpContext, op: *const pr.Op) bool {
     var active_output = false;
     for (op.outputs) |output| {
-        if (types.is_differentiable(output.aval) and ctx.get_cot(output) != null) {
+        if (types.is_differentiable(output.aval) and ctx.cotangent(output) != null) {
             active_output = true;
             break;
         }
@@ -221,8 +221,8 @@ pub fn has_local_jvp(prim: pr.Prim) bool {
     };
 }
 
-/// Execute JVP for an op (forward-mode tangent propagation).
-pub fn jvp(ctx: types.AdContext, op: *const pr.Op) types.AdError!void {
+/// Apply a local JVP rule to an operation.
+pub fn jvp(ctx: types.JvpContext, op: *const pr.Op) types.AdError!void {
     if (!requires_jvp(ctx, op)) return;
 
     switch (op.params) {
@@ -232,12 +232,12 @@ pub fn jvp(ctx: types.AdContext, op: *const pr.Op) types.AdError!void {
                 return try Handler.jvp(ctx, op, typed_params);
             }
             if (!@import("builtin").is_test) log.warn("{s} has no local JVP rule", .{@tagName(tag)});
-            return error.UnsupportedEqn;
+            return error.MissingDerivativeRule;
         },
     }
 }
 
-fn requires_jvp(ctx: types.AdContext, op: *const pr.Op) bool {
+fn requires_jvp(ctx: types.JvpContext, op: *const pr.Op) bool {
     var has_differentiable_output = false;
     for (op.outputs) |output| {
         if (types.is_differentiable(output.aval)) {
@@ -249,7 +249,7 @@ fn requires_jvp(ctx: types.AdContext, op: *const pr.Op) bool {
 
     for (op.inputs) |input| {
         if (types.is_differentiable(input.value.aval) and
-            ctx.get_tangent(input.value) != null) return true;
+            ctx.tangent(input.value) != null) return true;
     }
     return false;
 }
@@ -327,14 +327,13 @@ test "vjp rejects a missing rule on an active differentiable path" {
     @memset(cotangent_map, null);
     cotangent_map[outputs[0].id] = cotangent;
 
-    const context = types.AdContext{
+    const context = types.VjpContext{
         .builder = &derived_builder,
-        .primal_map = primal_map,
-        .cot_map = cotangent_map,
-        .tangent_map = null,
+        .primals = primal_map,
+        .cotangents = cotangent_map,
         .allocator = std.testing.allocator,
     };
-    try std.testing.expectError(error.UnsupportedEqn, vjp(context, source.ops[0]));
+    try std.testing.expectError(error.MissingDerivativeRule, vjp(context, source.ops[0]));
 
     cotangent_map[outputs[0].id] = null;
     try vjp(context, source.ops[0]);

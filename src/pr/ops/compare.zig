@@ -90,27 +90,27 @@ pub const select = struct {
     ///  on_true gets the cotangent where cond is true (zero elsewhere),
     ///  on_false gets the cotangent where cond is false (zero elsewhere).
     ///  No cotangent for cond itself (discrete, non-differentiable).
-    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 3) return error.UnsupportedEqn;
+    pub fn vjp(ctx: types.VjpContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 3) return error.InvalidOpArity;
 
-        const out_cot = ctx.get_cot(op.result(0)) orelse return;
-        const cond = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+        const out_cot = ctx.cotangent(op.result(0)) orelse return;
+        const cond = try ctx.primal(op.operand(0));
         const on_true_tensor = op.operand(1).as_tensor();
 
         const zeros = try ctx.builder.scalar_broadcast(on_true_tensor.dtype, on_true_tensor.shape.dims, 0.0);
         const true_contrib = try ctx.builder.select(cond, out_cot, zeros);
         const false_contrib = try ctx.builder.select(cond, zeros, out_cot);
 
-        try ctx.add_cot(op.operand(1), true_contrib);
-        try ctx.add_cot(op.operand(2), false_contrib);
+        try ctx.add_cotangent(op.operand(1), true_contrib);
+        try ctx.add_cotangent(op.operand(2), false_contrib);
     }
 
     /// JVP: \(\mathrm{d}(\operatorname{select}(c, t, f)) =
     ///  \operatorname{select}(c, \mathrm{d}t, \mathrm{d}f)\).
-    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 3) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.JvpContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 3) return error.InvalidOpArity;
 
-        const cond = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+        const cond = try ctx.primal(op.operand(0));
         const dt = try ctx.tangent_or_zero(op.operand(1));
         const df = try ctx.tangent_or_zero(op.operand(2));
         ctx.set_tangent(op.result(0), try ctx.builder.select(cond, dt, df));
