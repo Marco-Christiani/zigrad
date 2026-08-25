@@ -394,6 +394,28 @@ fn reindex_vars(func: *pr.Function) void {
     func.var_count = next_id;
 }
 
+/// Emit an augmented-primal call and validate its linearization contract.
+///
+/// The returned operation-output slice belongs to the builder's program.
+fn call_augmented_primal(
+    program: *pr.Program,
+    builder: *pr.FunctionBuilder,
+    /// Function from which `linearization` was derived.
+    source: pr.Function,
+    /// Linearization whose augmented primal is called.
+    linearization: Linearization,
+    /// Arguments to the source function in parameter order.
+    inputs: []const *pr.Var,
+) AdError![]*pr.Var {
+    const augmented = program.get_function_by_id(linearization.augmented_primal) orelse
+        return error.CallUnresolvedCallee;
+    const outputs = (try builder.call(linearization.augmented_primal, inputs)).outputs;
+    if (outputs.len != augmented.returns.len or
+        outputs.len != source.returns.len + linearization.residual_count)
+        return error.UnsupportedEqn;
+    return outputs;
+}
+
 fn linearize_call(
     traversal: *LinearizationTraversal,
     primal_ctx: ops.types.AdContext,
@@ -412,12 +434,13 @@ fn linearize_call(
         input.* = primal_ctx.get_primal(operand.value) orelse
             return error.UnsupportedEqn;
     }
-    const primal_outputs = (try primal_ctx.builder.call(
-        callee_linearization.augmented_primal,
+    const primal_outputs = try call_augmented_primal(
+        traversal.program,
+        primal_ctx.builder,
+        callee,
+        callee_linearization,
         primal_inputs,
-    )).outputs;
-    if (primal_outputs.len != callee.returns.len + callee_linearization.residual_count)
-        return error.UnsupportedEqn;
+    );
     for (op.outputs, primal_outputs[0..callee.returns.len]) |source_output, output| {
         primal_ctx.set_primal(source_output, output);
 
@@ -814,8 +837,6 @@ pub fn vjp(
     defer allocator.free(selected_inputs);
 
     const result = try linearize(allocator, program, source, name);
-    const augmented_primal = program.get_function_by_id(result.augmented_primal) orelse
-        return error.CallUnresolvedCallee;
     const linear = program.get_function_by_id(result.linear) orelse
         return error.CallUnresolvedCallee;
 
@@ -864,10 +885,13 @@ pub fn vjp(
         seed.* = try builder.param_like(func.returns[source_index].aval);
     }
 
-    const primal_outputs = (try builder.call(result.augmented_primal, params)).outputs;
-    if (primal_outputs.len != augmented_primal.returns.len or
-        primal_outputs.len != func.returns.len + result.residual_count)
-        return error.UnsupportedEqn;
+    const primal_outputs = try call_augmented_primal(
+        program,
+        &builder,
+        func,
+        result,
+        params,
+    );
 
     const gradients = try allocator.alloc(*pr.Var, selected_inputs.len);
     defer allocator.free(gradients);
@@ -970,8 +994,6 @@ pub fn jvp(
     const func = program.get_function_by_id(source) orelse
         return error.CallUnresolvedCallee;
     const result = try linearize(allocator, program, source, name);
-    const augmented_primal = program.get_function_by_id(result.augmented_primal) orelse
-        return error.CallUnresolvedCallee;
     const linear = program.get_function_by_id(result.linear) orelse
         return error.CallUnresolvedCallee;
 
@@ -997,10 +1019,13 @@ pub fn jvp(
         tangents[index] = try builder.param_like(source_param.aval);
     }
 
-    const primal_outputs = (try builder.call(result.augmented_primal, params)).outputs;
-    if (primal_outputs.len != augmented_primal.returns.len or
-        primal_outputs.len != func.returns.len + result.residual_count)
-        return error.UnsupportedEqn;
+    const primal_outputs = try call_augmented_primal(
+        program,
+        &builder,
+        func,
+        result,
+        params,
+    );
 
     const linear_inputs = try allocator.alloc(*pr.Var, linear.params.len);
     defer allocator.free(linear_inputs);
