@@ -62,12 +62,12 @@ pub const dot = struct {
 
         const a = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
         const b = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
-        const da = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
-        const db = ctx.get_tangent(op.operand(1)) orelse return error.UnsupportedEqn;
-
-        const term1 = try ctx.builder.dot(da, b);
-        const term2 = try ctx.builder.dot(a, db);
-        ctx.set_tangent(op.result(0), try ctx.builder.add(term1, term2));
+        if (ctx.get_tangent(op.operand(0))) |da| {
+            try ctx.add_tangent(op.result(0), try ctx.builder.dot(da, b));
+        }
+        if (ctx.get_tangent(op.operand(1))) |db| {
+            try ctx.add_tangent(op.result(0), try ctx.builder.dot(a, db));
+        }
     }
 
     pub fn format(writer: *types.Writer, op: *const pr.Op, _: void) types.FormatError!void {
@@ -162,17 +162,20 @@ fn matrix_multiply(comptime batched: bool) type {
         pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
             const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
             const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
-            const lhs_tangent = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
-            const rhs_tangent = ctx.get_tangent(op.operand(1)) orelse return error.UnsupportedEqn;
-            const lhs_term = if (batched)
-                try ctx.builder.bmm(lhs_tangent, rhs)
-            else
-                try ctx.builder.mm(lhs_tangent, rhs);
-            const rhs_term = if (batched)
-                try ctx.builder.bmm(lhs, rhs_tangent)
-            else
-                try ctx.builder.mm(lhs, rhs_tangent);
-            ctx.set_tangent(op.result(0), try ctx.builder.add(lhs_term, rhs_term));
+            if (ctx.get_tangent(op.operand(0))) |lhs_tangent| {
+                const term = if (batched)
+                    try ctx.builder.bmm(lhs_tangent, rhs)
+                else
+                    try ctx.builder.mm(lhs_tangent, rhs);
+                try ctx.add_tangent(op.result(0), term);
+            }
+            if (ctx.get_tangent(op.operand(1))) |rhs_tangent| {
+                const term = if (batched)
+                    try ctx.builder.bmm(lhs, rhs_tangent)
+                else
+                    try ctx.builder.mm(lhs, rhs_tangent);
+                try ctx.add_tangent(op.result(0), term);
+            }
         }
 
         pub fn format(writer: *types.Writer, op: *const pr.Op, _: void) types.FormatError!void {
@@ -299,11 +302,18 @@ pub const convolution = struct {
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, params: pr.ConvolutionParams) types.AdError!void {
         const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
         const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
-        const lhs_tangent = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
-        const rhs_tangent = ctx.get_tangent(op.operand(1)) orelse return error.UnsupportedEqn;
-        const lhs_term = try ctx.builder.convolution(lhs_tangent, rhs, params);
-        const rhs_term = try ctx.builder.convolution(lhs, rhs_tangent, params);
-        ctx.set_tangent(op.result(0), try ctx.builder.add(lhs_term, rhs_term));
+        if (ctx.get_tangent(op.operand(0))) |lhs_tangent| {
+            try ctx.add_tangent(
+                op.result(0),
+                try ctx.builder.convolution(lhs_tangent, rhs, params),
+            );
+        }
+        if (ctx.get_tangent(op.operand(1))) |rhs_tangent| {
+            try ctx.add_tangent(
+                op.result(0),
+                try ctx.builder.convolution(lhs, rhs_tangent, params),
+            );
+        }
     }
 
     pub fn format(writer: *types.Writer, _: *const pr.Op, params: pr.ConvolutionParams) types.FormatError!void {
@@ -457,12 +467,12 @@ pub const dot_general = struct {
 
         const a = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
         const b = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
-        const da = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
-        const db = ctx.get_tangent(op.operand(1)) orelse return error.UnsupportedEqn;
-
-        const term1 = try ctx.builder.dot_general(da, b, dg_params);
-        const term2 = try ctx.builder.dot_general(a, db, dg_params);
-        ctx.set_tangent(op.result(0), try ctx.builder.add(term1, term2));
+        if (ctx.get_tangent(op.operand(0))) |da| {
+            try ctx.add_tangent(op.result(0), try ctx.builder.dot_general(da, b, dg_params));
+        }
+        if (ctx.get_tangent(op.operand(1))) |db| {
+            try ctx.add_tangent(op.result(0), try ctx.builder.dot_general(a, db, dg_params));
+        }
     }
 
     pub fn format(writer: *types.Writer, _: *const pr.Op, dg_params: pr.DotGeneralParams) types.FormatError!void {

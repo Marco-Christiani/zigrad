@@ -115,17 +115,6 @@ pub const iota = struct {
         return .{ .tensor = .{ .dtype = ip.out_dtype, .shape = .{ .dims = ip.out_shape } } };
     }
 
-    /// JVP of iota is a zero tangent.
-    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: pr.IotaParams) types.AdError!void {
-        const out_tensor = op.result(0).as_tensor();
-        const z = try ctx.builder.scalar(out_tensor.dtype, 0);
-        const z_broad = if (out_tensor.shape.rank() == 0)
-            z
-        else
-            try ctx.builder.broadcast_in_dim(z, out_tensor.shape.dims, &.{});
-        ctx.set_tangent(op.result(0), z_broad);
-    }
-
     pub fn format(writer: *types.Writer, _: *const pr.Op, ip: pr.IotaParams) types.FormatError!void {
         try writer.print("dim={d} dtype={s} shape=", .{ ip.dimension, @tagName(ip.out_dtype) });
         try format_shape(writer, ip.out_shape);
@@ -306,7 +295,7 @@ pub const concatenate = struct {
         var tangents = try ctx.allocator.alloc(*pr.Var, op.inputs.len);
         defer ctx.allocator.free(tangents);
         for (op.inputs, 0..) |operand, i| {
-            tangents[i] = ctx.get_tangent(operand.value) orelse return error.UnsupportedEqn;
+            tangents[i] = try ctx.tangent_or_zero(operand.value);
         }
         ctx.set_tangent(op.result(0), try ctx.builder.concatenate(tangents, cp.axis));
     }

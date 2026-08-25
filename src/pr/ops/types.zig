@@ -52,6 +52,28 @@ pub const AdContext = struct {
     pub fn set_tangent(self: AdContext, v: *const pr.Var, value: *pr.Var) void {
         self.tangent_map.?[v.id] = value;
     }
+
+    /// Return `v`'s tangent, materializing zero when it is structurally absent.
+    pub fn tangent_or_zero(self: AdContext, v: *const pr.Var) pr.BuildError!*pr.Var {
+        return self.get_tangent(v) orelse try self.zero_like(v.as_tensor());
+    }
+
+    /// Emit a zero with `tensor`'s dtype and shape.
+    pub fn zero_like(self: AdContext, tensor: pr.Tensor) pr.BuildError!*pr.Var {
+        const zero = try self.builder.scalar(tensor.dtype, 0.0);
+        if (tensor.shape.rank() == 0) return zero;
+        return try self.builder.broadcast_in_dim(zero, tensor.shape.dims, &.{});
+    }
+
+    /// Add one tangent contribution to `v`.
+    pub fn add_tangent(self: AdContext, v: *const pr.Var, contribution: *pr.Var) pr.BuildError!void {
+        const tmap = self.tangent_map.?;
+        if (tmap[v.id]) |existing| {
+            tmap[v.id] = try self.builder.add(existing, contribution);
+        } else {
+            tmap[v.id] = contribution;
+        }
+    }
 };
 
 pub const Writer = std.Io.Writer;
@@ -74,3 +96,13 @@ pub const AdError = pr.BuildError || error{
     /// `VjpOpts.of` provides no output cotangent seeds.
     EmptyOutputSelection,
 };
+
+/// Reports whether standard PR AD defines dual values for `aval`.
+pub fn is_differentiable(aval: pr.Aval) bool {
+    return switch (aval) {
+        .tensor => |tensor| switch (tensor.dtype) {
+            .f16, .bf16, .f32, .f64 => true,
+            else => false,
+        },
+    };
+}

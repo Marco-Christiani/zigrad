@@ -201,7 +201,7 @@ pub fn vjp(ctx: types.AdContext, op: *const pr.Op) types.AdError!void {
 fn requires_vjp(ctx: types.AdContext, op: *const pr.Op) bool {
     var active_output = false;
     for (op.outputs) |output| {
-        if (is_differentiable(output.as_tensor().dtype) and ctx.get_cot(output) != null) {
+        if (types.is_differentiable(output.aval) and ctx.get_cot(output) != null) {
             active_output = true;
             break;
         }
@@ -209,18 +209,9 @@ fn requires_vjp(ctx: types.AdContext, op: *const pr.Op) bool {
     if (!active_output) return false;
 
     for (op.inputs) |input| {
-        if (is_differentiable(input.value.as_tensor().dtype)) return true;
+        if (types.is_differentiable(input.value.aval)) return true;
     }
     return false;
-}
-
-fn is_differentiable(dtype: pr.DType) bool {
-    // TODO(ad): Let operations register custom dual semantics for discrete
-    //  values, including surrogate and straight-through estimators.
-    return switch (dtype) {
-        .f16, .bf16, .f32, .f64 => true,
-        else => false,
-    };
 }
 
 /// Check if an op provides a local JVP rule.
@@ -232,6 +223,8 @@ pub fn has_local_jvp(prim: pr.Prim) bool {
 
 /// Execute JVP for an op (forward-mode tangent propagation).
 pub fn jvp(ctx: types.AdContext, op: *const pr.Op) types.AdError!void {
+    if (!requires_jvp(ctx, op)) return;
+
     switch (op.params) {
         inline else => |typed_params, tag| {
             const Handler = OpFor(tag);
@@ -242,6 +235,23 @@ pub fn jvp(ctx: types.AdContext, op: *const pr.Op) types.AdError!void {
             return error.UnsupportedEqn;
         },
     }
+}
+
+fn requires_jvp(ctx: types.AdContext, op: *const pr.Op) bool {
+    var has_differentiable_output = false;
+    for (op.outputs) |output| {
+        if (types.is_differentiable(output.aval)) {
+            has_differentiable_output = true;
+            break;
+        }
+    }
+    if (!has_differentiable_output) return false;
+
+    for (op.inputs) |input| {
+        if (types.is_differentiable(input.value.aval) and
+            ctx.get_tangent(input.value) != null) return true;
+    }
+    return false;
 }
 
 /// Format op-specific attributes.
@@ -349,16 +359,16 @@ test "local jvp support detection" {
     try std.testing.expect(has_local_jvp(.slice));
     try std.testing.expect(has_local_jvp(.concatenate));
     try std.testing.expect(has_local_jvp(.gather));
-    try std.testing.expect(has_local_jvp(.iota));
+    try std.testing.expect(!has_local_jvp(.iota));
 
     try std.testing.expect(has_local_jvp(.dot));
     try std.testing.expect(has_local_jvp(.mm));
     try std.testing.expect(has_local_jvp(.bmm));
     try std.testing.expect(has_local_jvp(.dot_general));
 
-    try std.testing.expect(has_local_jvp(.literal));
+    try std.testing.expect(!has_local_jvp(.literal));
 
-    try std.testing.expect(has_local_jvp(.compare));
+    try std.testing.expect(!has_local_jvp(.compare));
     try std.testing.expect(has_local_jvp(.select));
 
     try std.testing.expect(has_local_jvp(.maximum));

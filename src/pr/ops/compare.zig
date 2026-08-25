@@ -51,9 +51,6 @@ pub const compare = struct {
         return .{ .tensor = .{ .dtype = .bool, .shape = lhs.shape } };
     }
 
-    /// JVP: compare produces booleans, no meaningful tangent.
-    pub fn jvp(_: types.AdContext, _: *const pr.Op, _: pr.CompareParams) types.AdError!void {}
-
     pub fn format(writer: *types.Writer, _: *const pr.Op, cparams: pr.CompareParams) types.FormatError!void {
         try format_compare_params(writer, cparams);
     }
@@ -114,8 +111,8 @@ pub const select = struct {
         if (op.inputs.len != 3) return error.UnsupportedEqn;
 
         const cond = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const dt = ctx.get_tangent(op.operand(1)) orelse return error.UnsupportedEqn;
-        const df = ctx.get_tangent(op.operand(2)) orelse return error.UnsupportedEqn;
+        const dt = try ctx.tangent_or_zero(op.operand(1));
+        const df = try ctx.tangent_or_zero(op.operand(2));
         ctx.set_tangent(op.result(0), try ctx.builder.select(cond, dt, df));
     }
 };

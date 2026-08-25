@@ -56,9 +56,10 @@ pub const add = struct {
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
-        const dx = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
-        const dy = ctx.get_tangent(op.operand(1)) orelse return error.UnsupportedEqn;
-        ctx.set_tangent(op.result(0), try ctx.builder.add(dx, dy));
+        const dx = ctx.get_tangent(op.operand(0));
+        const dy = ctx.get_tangent(op.operand(1));
+        if (dx) |value| try ctx.add_tangent(op.result(0), value);
+        if (dy) |value| try ctx.add_tangent(op.result(0), value);
     }
 
     pub const format = format_binary_elementwise;
@@ -92,9 +93,13 @@ pub const subtract = struct {
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
-        const dx = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
-        const dy = ctx.get_tangent(op.operand(1)) orelse return error.UnsupportedEqn;
-        ctx.set_tangent(op.result(0), try ctx.builder.subtract(dx, dy));
+        const dx = ctx.get_tangent(op.operand(0));
+        const dy = ctx.get_tangent(op.operand(1));
+        if (dx) |value| try ctx.add_tangent(op.result(0), value);
+        if (dy) |value| {
+            const negated = try negate_like(ctx.builder, op.operand(1).as_tensor(), value);
+            try ctx.add_tangent(op.result(0), negated);
+        }
     }
 
     pub const format = format_binary_elementwise;
@@ -133,12 +138,12 @@ pub const multiply = struct {
 
         const x = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
         const y = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
-        const dx = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
-        const dy = ctx.get_tangent(op.operand(1)) orelse return error.UnsupportedEqn;
-
-        const term1 = try ctx.builder.multiply(dx, y);
-        const term2 = try ctx.builder.multiply(x, dy);
-        ctx.set_tangent(op.result(0), try ctx.builder.add(term1, term2));
+        if (ctx.get_tangent(op.operand(0))) |dx| {
+            try ctx.add_tangent(op.result(0), try ctx.builder.multiply(dx, y));
+        }
+        if (ctx.get_tangent(op.operand(1))) |dy| {
+            try ctx.add_tangent(op.result(0), try ctx.builder.multiply(x, dy));
+        }
     }
 
     pub const format = format_binary_elementwise;
@@ -188,14 +193,16 @@ pub const divide = struct {
 
         const x = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
         const y = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
-        const dx = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
-        const dy = ctx.get_tangent(op.operand(1)) orelse return error.UnsupportedEqn;
-
-        const term1 = try ctx.builder.divide(dx, y);
-        const y_sq = try ctx.builder.multiply(y, y);
-        const x_dy = try ctx.builder.multiply(x, dy);
-        const term2 = try ctx.builder.divide(x_dy, y_sq);
-        ctx.set_tangent(op.result(0), try ctx.builder.subtract(term1, term2));
+        if (ctx.get_tangent(op.operand(0))) |dx| {
+            try ctx.add_tangent(op.result(0), try ctx.builder.divide(dx, y));
+        }
+        if (ctx.get_tangent(op.operand(1))) |dy| {
+            const y_sq = try ctx.builder.multiply(y, y);
+            const x_dy = try ctx.builder.multiply(x, dy);
+            const term = try ctx.builder.divide(x_dy, y_sq);
+            const negated = try negate_like(ctx.builder, op.operand(1).as_tensor(), term);
+            try ctx.add_tangent(op.result(0), negated);
+        }
     }
 
     pub const format = format_binary_elementwise;
@@ -228,7 +235,7 @@ pub const maximum = struct {
             .direction = .GE,
             .compare_type = .FLOAT,
         });
-        const zero = try zero_like(ctx.builder, lhs_tensor);
+        const zero = try ctx.zero_like(lhs_tensor);
 
         try ctx.add_cot(op.operand(0), try ctx.builder.select(cmp, out_cot, zero));
         try ctx.add_cot(op.operand(1), try ctx.builder.select(cmp, zero, out_cot));
@@ -240,8 +247,8 @@ pub const maximum = struct {
 
         const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
         const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
-        const lhs_tangent = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
-        const rhs_tangent = ctx.get_tangent(op.operand(1)) orelse return error.UnsupportedEqn;
+        const lhs_tangent = try ctx.tangent_or_zero(op.operand(0));
+        const rhs_tangent = try ctx.tangent_or_zero(op.operand(1));
         const select_lhs = try ctx.builder.compare(lhs, rhs, .{
             .direction = .GE,
             .compare_type = .FLOAT,
@@ -256,14 +263,6 @@ pub const maximum = struct {
 };
 
 // Helpers.
-
-/// Zero scalar broadcast to match `tensor`'s shape and dtype.
-/// Handles rank-0 (scalar) tensors by skipping the broadcast.
-fn zero_like(bld: *pr.FunctionBuilder, tensor: Tensor) pr.BuildError!*pr.Var {
-    const zero = try bld.scalar(tensor.dtype, 0.0);
-    if (tensor.shape.rank() == 0) return zero;
-    return try bld.broadcast_in_dim(zero, tensor.shape.dims, &.{});
-}
 
 /// Negate a value by multiplying with a -1 scalar broadcast to match `tensor`'s shape.
 /// Handles rank-0 (scalar) tensors by skipping the broadcast.

@@ -22,14 +22,6 @@ pub const literal = struct {
 
     // No VJP is needed because constants have zero gradient.
 
-    /// JVP: constants have zero tangent.
-    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: pr.Literal) types.AdError!void {
-        const out_primal = ctx.get_primal(op.result(0)) orelse return error.UnsupportedEqn;
-        const out_tensor = out_primal.as_tensor();
-        const z = try ctx.builder.scalar(out_tensor.dtype, 0.0);
-        ctx.set_tangent(op.result(0), z);
-    }
-
     pub fn format(writer: *types.Writer, _: *const pr.Op, lit: pr.Literal) types.FormatError!void {
         switch (lit) {
             .f16 => |v| try writer.print("{d}", .{pr.DType.f16.decode(f32, v)}),
