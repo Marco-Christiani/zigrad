@@ -5,7 +5,7 @@
 //!
 //! The canonical use is `value_and_grad`, which:
 //!  1. Builds a sub-function from the differentiated closure,
-//!  2. Applies `pr.ad.vjp_with_value` to produce a VJP function,
+//!  2. Applies `pr.ad.vjp` to produce a VJP function that includes values,
 //!  3. Emits a call to the VJP function in the *outer* builder,
 //!  4. Returns every source output and a `Tree(Tensor)` of gradients.
 //!
@@ -96,8 +96,8 @@ pub fn ValueAndGrad(comptime OutputsType: type) type {
 ///  1. Flattens `args` into a `Tree(Tensor)` and collects their VarIds.
 ///  2. Builds a sub-function by tracing `func` with fresh parameters matching
 ///      the input specs.
-///  3. Applies `pr.ad.vjp_with_value` to produce a VJP function that returns
-///      every source output followed by the selected gradients.
+///  3. Applies `pr.ad.vjp` to produce a VJP function that returns every source
+///      output followed by the selected gradients.
 ///  4. Emits a `call` to the VJP function in the *outer* builder with a
 ///      ones-like cotangent seed.
 ///  5. Reconstructs the source output tree and returns it with a
@@ -188,9 +188,10 @@ pub fn value_and_grad(
     //  become dead and are cleaned up by the backend's DCE.
     const wrt_indices = comptime selected_leaf_indices(ArgsType, opts.wrt_argnums);
     const vjp_name = try program.reserve_unique_function_name("vg_vjp");
-    const vjp_id = try ad.vjp_with_value(alloc, program, source_id, vjp_name, .{
+    const vjp_id = try ad.vjp(alloc, program, source_id, vjp_name, .{
         .of = &.{selected_output},
         .wrt = &wrt_indices,
+        .include_primal_outputs = true,
     });
 
     // Emit a ones-like cotangent for the selected scalar output in the outer builder.
@@ -245,6 +246,13 @@ pub fn value_and_grad(
 /// Returns a comptime callable that accepts `func`'s arguments and produces
 /// gradients with the structure described by `GradOpts`. Pass the returned
 /// callable to `zg.trace()`.
+///
+/// Using the notation from `value_and_grad`, the generated callable returns
+///
+/// $$
+/// \left(\nabla_{x_{w_1}}f_o(x), \ldots,
+/// \nabla_{x_{w_k}}f_o(x)\right).
+/// $$
 ///
 /// ```zig
 /// const grad_fn = comptime zg.grad(loss_fn, .{});

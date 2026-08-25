@@ -5,6 +5,16 @@
 //!
 //! JVP and VJP register the complete derived call graph in the supplied
 //!  program and return the derived callable's identity.
+//!
+//! Generated functions are ordinary PR functions and may be differentiated
+//!  again. For a scalar $f$ on a Euclidean space, holding the VJP seed at
+//!  one gives the Hessian-vector product
+//!
+//! $$
+//! \operatorname{jvp}_{x \mapsto \operatorname{vjp}_f(x, 1)}(x, v)
+//! = H_f(x)v.
+//! $$
+//!
 //! Higher-level traced transforms live in `transforms.zig`.
 const std = @import("std");
 
@@ -16,7 +26,7 @@ pub const AdError = ops.types.AdError || pr.FunctionRegistrationError || error{
     RecursiveDifferentiationUnsupported,
 };
 
-/// Options for `vjp` and `vjp_with_value`.
+/// Options for `vjp`.
 pub const VjpOpts = struct {
     /// Select source-function outputs whose cotangents seed the VJP.
     ///
@@ -30,6 +40,30 @@ pub const VjpOpts = struct {
     /// `null` selects every input. The output order matches this slice, including
     ///  duplicate indices.
     wrt: ?[]const usize = null,
+
+    /// Include source-function outputs before the selected input cotangents.
+    ///
+    /// When enabled, the transformed codomain is
+    ///
+    /// $$
+    /// (Y_1 \times \cdots \times Y_m)
+    /// \times (T^*_{x_{w_1}}X_{w_1} \times \cdots
+    /// \times T^*_{x_{w_k}}X_{w_k}).
+    /// $$
+    include_primal_outputs: bool = false,
+};
+
+/// Options for `jvp`.
+pub const JvpOpts = struct {
+    /// Include source-function outputs before the output tangents.
+    ///
+    /// When enabled, the transformed codomain is
+    ///
+    /// $$
+    /// (Y_1 \times \cdots \times Y_m)
+    /// \times (T_{f_1(x)}Y_1 \times \cdots \times T_{f_m(x)}Y_m).
+    /// $$
+    include_primal_outputs: bool = false,
 };
 
 /// Functions and output mapping produced by linearizing one PR function.
@@ -102,6 +136,28 @@ const LinearizationTraversal = struct {
 };
 
 /// Linearize `func` into an augmented primal and a residualized linear map.
+///
+/// For $f: X \to Y$, the transform chooses a residual space $R$ and
+///  constructs
+///
+/// $$
+/// p: X \to Y \times R,
+/// \qquad
+/// p(x) = \left(f(x), r(x)\right),
+/// $$
+///
+/// and
+///
+/// $$
+/// \ell: T_xX \times R \to T_{f(x)}Y,
+/// \qquad
+/// \ell\left(v, r(x)\right) = \mathrm{d}f_x(v).
+/// $$
+///
+/// `Linearization.augmented_primal` identifies $p$, and
+///  `Linearization.linear` identifies $\ell$. Structurally zero output
+///  tangents may be omitted from $\ell$; `output_tangent_indices` maps the
+///  retained results back to the outputs of $f$.
 ///
 /// The generated functions are registered in `program`. Their names are
 ///  derived from `name` and made unique within the program. Generated
@@ -394,9 +450,6 @@ fn linearize_call(
     }
 }
 
-/// Controls whether a derivative function also returns primal outputs.
-const PrimalOutputs = enum { skip, emit };
-
 const GeneratedTranspose = struct {
     callee: pr.FunctionId,
     selected_outputs: []const usize,
@@ -668,52 +721,6 @@ pub fn vjp(
     ///  source output and returns every parameter cotangent.
     opts: VjpOpts,
 ) AdError!pr.FunctionId {
-    return try apply_transposed_linearization(
-        allocator,
-        program,
-        source,
-        name,
-        .skip,
-        opts,
-    );
-}
-
-/// Apply VJP and emit primal outputs before input cotangents.
-///
-/// Using the notation from `vjp`, this changes the codomain to
-///
-/// $$
-/// (Y_1 \times \cdots \times Y_m)
-/// \times (T^*_{x_{w_1}}X_{w_1} \times \cdots
-/// \times T^*_{x_{w_k}}X_{w_k}).
-/// $$
-///
-/// See `vjp`
-pub fn vjp_with_value(
-    allocator: std.mem.Allocator,
-    program: *pr.Program,
-    source: pr.FunctionId,
-    name: []const u8,
-    opts: VjpOpts,
-) AdError!pr.FunctionId {
-    return try apply_transposed_linearization(
-        allocator,
-        program,
-        source,
-        name,
-        .emit,
-        opts,
-    );
-}
-
-fn apply_transposed_linearization(
-    allocator: std.mem.Allocator,
-    program: *pr.Program,
-    source: pr.FunctionId,
-    name: []const u8,
-    primals: PrimalOutputs,
-    opts: VjpOpts,
-) AdError!pr.FunctionId {
     const saved = program.checkpoint_appends();
     errdefer program.restore_appends(saved);
     const func = program.get_function_by_id(source) orelse
@@ -840,10 +847,10 @@ fn apply_transposed_linearization(
         }
     }
 
-    const primal_count: usize = if (primals == .emit) func.returns.len else 0;
+    const primal_count: usize = if (opts.include_primal_outputs) func.returns.len else 0;
     const outputs = try allocator.alloc(*pr.Var, primal_count + gradients.len);
     defer allocator.free(outputs);
-    if (primals == .emit) {
+    if (opts.include_primal_outputs) {
         @memcpy(outputs[0..primal_count], primal_outputs[0..primal_count]);
     }
     @memcpy(outputs[primal_count..], gradients);
@@ -876,30 +883,12 @@ fn apply_transposed_linearization(
 /// \times (T_{x_1}X_1 \times \cdots \times T_{x_n}X_n)
 /// \to T_{f_1(x)}Y_1 \times \cdots \times T_{f_m(x)}Y_m.
 /// $$
-pub fn jvp(allocator: std.mem.Allocator, program: *pr.Program, source: pr.FunctionId, name: []const u8) AdError!pr.FunctionId {
-    return try apply_linearization(allocator, program, source, name, .skip);
-}
-
-/// Apply JVP and emit primal outputs before output tangents.
-///
-/// Using the notation from `jvp`, this changes the codomain to
-///
-/// $$
-/// (Y_1 \times \cdots \times Y_m)
-/// \times (T_{f_1(x)}Y_1 \times \cdots \times T_{f_m(x)}Y_m).
-/// $$
-///
-/// See `jvp`
-pub fn jvp_with_value(allocator: std.mem.Allocator, program: *pr.Program, source: pr.FunctionId, name: []const u8) AdError!pr.FunctionId {
-    return try apply_linearization(allocator, program, source, name, .emit);
-}
-
-fn apply_linearization(
+pub fn jvp(
     allocator: std.mem.Allocator,
     program: *pr.Program,
     source: pr.FunctionId,
     name: []const u8,
-    primals: PrimalOutputs,
+    opts: JvpOpts,
 ) AdError!pr.FunctionId {
     const saved = program.checkpoint_appends();
     errdefer program.restore_appends(saved);
@@ -939,14 +928,14 @@ fn apply_linearization(
     const linear_outputs = (try builder.call(result.linear, linear_inputs)).outputs;
     if (linear_outputs.len != linear.returns.len) return error.UnsupportedEqn;
 
-    const output_count = switch (primals) {
-        .emit => func.returns.len * 2,
-        .skip => func.returns.len,
-    };
+    const output_count = if (opts.include_primal_outputs)
+        func.returns.len * 2
+    else
+        func.returns.len;
     const outputs = try allocator.alloc(*pr.Var, output_count);
     defer allocator.free(outputs);
     var output_index: usize = 0;
-    if (primals == .emit) {
+    if (opts.include_primal_outputs) {
         @memcpy(outputs[0..func.returns.len], primal_outputs[0..func.returns.len]);
         output_index = func.returns.len;
     }
@@ -1197,7 +1186,7 @@ test "vjp rejects invalid output selection" {
     );
 }
 
-test "vjp_with_value returns primals plus gradients" {
+test "vjp can include primals before gradients" {
     var program = pr.Program.init(std.testing.allocator);
     defer program.deinit();
 
@@ -1209,7 +1198,9 @@ test "vjp_with_value returns primals plus gradients" {
     const func = try b.finish(&.{y});
     const source_id = try program.add_function(func);
 
-    const vjp_id = try vjp_with_value(std.testing.allocator, &program, source_id, "vjp_with_value", .{});
+    const vjp_id = try vjp(std.testing.allocator, &program, source_id, "vjp_with_primals", .{
+        .include_primal_outputs = true,
+    });
     const vjp_func = program.get_function_by_id(vjp_id).?;
     try pr.validate_ops_in_func(vjp_func);
 
@@ -1344,7 +1335,7 @@ test "jvp produces tangent outputs matching function output shapes" {
     const func = try b.finish(&.{out_id});
     const source_id = try program.add_function(func);
 
-    const jvp_id = try jvp(std.testing.allocator, &program, source_id, "jvp");
+    const jvp_id = try jvp(std.testing.allocator, &program, source_id, "jvp", .{});
     const jvp_func = program.get_function_by_id(jvp_id).?;
     try pr.validate_ops_in_func(jvp_func);
 
@@ -1454,6 +1445,7 @@ test "AD carries call results into nonlinear consumers" {
         &program,
         caller_id,
         "fourth_power_jvp",
+        .{},
     );
     const differentiated = program.get_function_by_id(differentiated_id).?;
     try pr.validate_program(&program);
@@ -1510,7 +1502,7 @@ test "AD carries call results into nonlinear consumers" {
     try std.testing.expectApproxEqAbs(@as(f32, 96.0), cotangents[0].data[0], 1e-5);
 }
 
-test "jvp_with_value returns primals plus tangents" {
+test "jvp can include primals before tangents" {
     var program = pr.Program.init(std.testing.allocator);
     defer program.deinit();
 
@@ -1522,7 +1514,9 @@ test "jvp_with_value returns primals plus tangents" {
     const func = try b.finish(&.{y});
     const source_id = try program.add_function(func);
 
-    const jvp_id = try jvp_with_value(std.testing.allocator, &program, source_id, "jvp_with_value");
+    const jvp_id = try jvp(std.testing.allocator, &program, source_id, "jvp_with_primals", .{
+        .include_primal_outputs = true,
+    });
     const jvp_func = program.get_function_by_id(jvp_id).?;
     try pr.validate_ops_in_func(jvp_func);
 
@@ -1545,6 +1539,7 @@ test "jvp routes maximum tangents through the selected operand" {
         &program,
         source_id,
         "maximum_jvp",
+        .{},
     );
     const differentiated = program.get_function_by_id(differentiated_id).?;
 
@@ -1606,7 +1601,7 @@ test "dot_general jvp with batch dims" {
     const func = try b.finish(&.{out});
     const source_id = try program.add_function(func);
 
-    const jvp_id = try jvp(std.testing.allocator, &program, source_id, "jvp");
+    const jvp_id = try jvp(std.testing.allocator, &program, source_id, "jvp", .{});
     const jvp_func = program.get_function_by_id(jvp_id).?;
     try pr.validate_ops_in_func(jvp_func);
 
