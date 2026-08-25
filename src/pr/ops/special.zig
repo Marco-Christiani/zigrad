@@ -43,16 +43,4 @@ pub const call = struct {
     pub fn format(writer: *types.Writer, _: *const pr.Op, cp: pr.CallParams) types.FormatError!void {
         try writer.print("callee=@{d}", .{@intFromEnum(cp.callee)});
     }
-
-    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, cp: pr.CallParams) types.AdError!void {
-        const inputs = try ctx.allocator.alloc(*pr.Var, op.inputs.len);
-        defer ctx.allocator.free(inputs);
-        for (op.inputs, inputs) |operand, *input| {
-            input.* = ctx.get_primal(operand.value) orelse return error.UnsupportedEqn;
-        }
-
-        const outputs = try ctx.builder.call(cp.callee, inputs);
-        if (outputs.len != op.outputs.len) return error.UnsupportedEqn;
-        for (op.outputs, outputs) |output, primal| ctx.set_primal(output, primal);
-    }
 };

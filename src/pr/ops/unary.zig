@@ -38,14 +38,6 @@ pub const exp = struct {
         return try infer_unary_elementwise(error.ExpTypeMismatch, inputs);
     }
 
-    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
-
-        const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const out = try ctx.builder.exp(operand);
-        ctx.set_primal(op.result(0), out);
-    }
-
     pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
@@ -78,14 +70,6 @@ pub const log = struct {
 
     pub fn infer_output(_: std.mem.Allocator, inputs: []const *pr.Var, _: void) pr.BuildError!Aval {
         return try infer_unary_elementwise(error.LogTypeMismatch, inputs);
-    }
-
-    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
-
-        const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const out = try ctx.builder.log(operand);
-        ctx.set_primal(op.result(0), out);
     }
 
     pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
@@ -129,14 +113,6 @@ pub const convert = struct {
         return .{ .tensor = .{ .dtype = out_dtype, .shape = operand.shape } };
     }
 
-    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, out_dtype: pr.DType) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
-
-        const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const out = try ctx.builder.convert(operand, out_dtype);
-        ctx.set_primal(op.result(0), out);
-    }
-
     pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: pr.DType) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
@@ -173,14 +149,6 @@ pub const rsqrt = struct {
 
     pub fn infer_output(_: std.mem.Allocator, inputs: []const *pr.Var, _: void) pr.BuildError!Aval {
         return try infer_unary_elementwise(error.RsqrtTypeMismatch, inputs);
-    }
-
-    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
-
-        const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const out = try ctx.builder.rsqrt(operand);
-        ctx.set_primal(op.result(0), out);
     }
 
     /// VJP: \(\mathrm{d}(\operatorname{rsqrt}(x)) =
@@ -234,14 +202,6 @@ pub const logistic = struct {
 
     pub fn infer_output(_: std.mem.Allocator, inputs: []const *pr.Var, _: void) pr.BuildError!Aval {
         return try infer_unary_elementwise(error.LogisticTypeMismatch, inputs);
-    }
-
-    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
-
-        const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const out = try ctx.builder.logistic(operand);
-        ctx.set_primal(op.result(0), out);
     }
 
     /// VJP: \(\mathrm{d}(\operatorname{sigmoid}(x)) =

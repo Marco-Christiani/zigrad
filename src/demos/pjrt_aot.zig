@@ -10,13 +10,15 @@ pub fn run(
     backend: *zg.pjrt.Backend,
 ) !void {
     const allocator = ctx.allocator;
-    var program = try demos.build_demo_program(allocator);
+    var program = zg.pr.Program.init(allocator);
     defer program.deinit();
+    const entry = try demos.build_demo_program(&program);
+    try program.set_entry(entry);
 
     var pipeline = try zg.pjrt.pipeline.create(
         allocator,
         backend,
-        .{ .stablehlo = .{ .entry_name = "main" } },
+        .{},
     );
     defer pipeline.deinit();
     var loaded_program = try pipeline.run(

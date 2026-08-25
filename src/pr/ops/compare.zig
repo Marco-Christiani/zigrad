@@ -51,15 +51,6 @@ pub const compare = struct {
         return .{ .tensor = .{ .dtype = .bool, .shape = lhs.shape } };
     }
 
-    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, cparams: pr.CompareParams) types.AdError!void {
-        if (op.inputs.len != 2) return error.UnsupportedEqn;
-
-        const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
-        const out = try ctx.builder.compare(lhs, rhs, cparams);
-        ctx.set_primal(op.result(0), out);
-    }
-
     /// JVP: compare produces booleans, no meaningful tangent.
     pub fn jvp(_: types.AdContext, _: *const pr.Op, _: pr.CompareParams) types.AdError!void {}
 
@@ -96,16 +87,6 @@ pub const select = struct {
         if (!types.same_tensor_type(on_true, on_false)) return error.SelectTypeMismatch;
         if (!std.mem.eql(i64, cond.shape.dims, on_true.shape.dims)) return error.SelectTypeMismatch;
         return .{ .tensor = on_true };
-    }
-
-    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 3) return error.UnsupportedEqn;
-
-        const cond = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const on_true = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
-        const on_false = ctx.get_primal(op.operand(2)) orelse return error.UnsupportedEqn;
-        const out = try ctx.builder.select(cond, on_true, on_false);
-        ctx.set_primal(op.result(0), out);
     }
 
     /// VJP backward for select. Routes the cotangent to the chosen branch:

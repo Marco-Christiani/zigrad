@@ -155,11 +155,11 @@ test "function includes custom-call payload" {
     var first_builder = try pr.FunctionBuilder.init(&first_program, "first");
     defer first_builder.deinit();
     const first_input = try first_builder.param_tensor(.f32, &.{2});
-    const first_outputs = try first_builder.custom_call(.{
+    const first_outputs = (try first_builder.custom_call(.{
         .target_name = "example.dispatch",
         .has_side_effect = false,
         .payload = &.{1},
-    }, &.{first_input}, &.{first_input.aval});
+    }, &.{first_input}, &.{first_input.aval})).outputs;
     const first = try first_builder.finish(first_outputs);
 
     var second_program = pr.Program.init(std.testing.allocator);
@@ -167,11 +167,11 @@ test "function includes custom-call payload" {
     var second_builder = try pr.FunctionBuilder.init(&second_program, "second");
     defer second_builder.deinit();
     const second_input = try second_builder.param_tensor(.f32, &.{2});
-    const second_outputs = try second_builder.custom_call(.{
+    const second_outputs = (try second_builder.custom_call(.{
         .target_name = "example.dispatch",
         .has_side_effect = false,
         .payload = &.{2},
-    }, &.{second_input}, &.{second_input.aval});
+    }, &.{second_input}, &.{second_input.aval})).outputs;
     const second = try second_builder.finish(second_outputs);
 
     const first_fingerprint = try function(std.testing.allocator, first);
@@ -237,8 +237,8 @@ test "function rejects unresolved calls" {
     var builder = try pr.FunctionBuilder.init(&program, "caller");
     defer builder.deinit();
     const input = try builder.param_tensor(.f32, &.{2});
-    const result = try builder.call(callee_id, &.{input});
-    const func = try builder.finish(result);
+    const call_op = try builder.call(callee_id, &.{input});
+    const func = try builder.finish(call_op.outputs);
 
     try std.testing.expectError(error.UnsupportedCall, function(std.testing.allocator, func));
 }

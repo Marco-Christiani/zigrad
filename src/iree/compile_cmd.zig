@@ -47,9 +47,9 @@ pub fn run(
     defer allocator.free(serialized);
     var program = try zg.pr.serialize.parse(allocator, serialized);
     defer program.deinit();
-    const entry_id = try zg.mlir.lowering.resolve_entry_function(&program, opts.entry);
+    const entry_id = try select_entry(&program, opts.entry);
     const entry = program.get_function_by_id(entry_id) orelse unreachable;
-    const entry_name = entry.name;
+    const entry_label = entry.name;
 
     var ctx = zg.CompilationCtx{
         .allocator = allocator,
@@ -61,19 +61,18 @@ pub fn run(
     try pipeline.add(zg.pr.Validate{});
     if (opts.pr) |selected| {
         var output_config = selected;
-        output_config.entry_name = output_config.entry_name orelse entry_name;
+        output_config.entry_label = output_config.entry_label orelse entry_label;
         try pipeline.add(zg.pr.dump.Dump{ .config = output_config });
     }
     try pipeline.add(zg.pr.transform.outline.Pass{});
     try pipeline.add(zg.mlir.stablehlo.Lower{
         .config = .{
-            .entry_name = entry_name,
             .encoding = if (opts.mlir == null) .binary else .text,
         },
     });
     if (opts.mlir) |selected| {
         var output_config = selected;
-        output_config.entry_name = output_config.entry_name orelse entry_name;
+        output_config.entry_label = output_config.entry_label orelse entry_label;
         try pipeline.add(zg.stablehlo.Dump{ .config = output_config });
     }
     try pipeline.add(&compiler.interface);
@@ -89,4 +88,12 @@ pub fn run(
     defer output.close(io);
     try output.writeStreamingAll(io, vmfb.bytes);
     std.log.info("wrote {d} bytes VMFB -> {s}", .{ vmfb.bytes.len, output_path });
+}
+
+fn select_entry(program: *zg.pr.Program, requested_name: ?[]const u8) !zg.pr.FunctionId {
+    if (requested_name) |name| {
+        const requested = program.get_function_id(name) orelse return error.EntryNotFound;
+        try program.set_entry(requested);
+    }
+    return try program.resolve_entry();
 }

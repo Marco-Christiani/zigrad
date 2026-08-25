@@ -22,9 +22,9 @@
 //!     return .{ .loss = vg.outputs, .updated = updated.extract(Params) };
 //! }
 //! // Trace and compile the whole step as one program:
-//! var program = try zg.trace(train_step, allocator, specs, "train_step");
-//! defer program.deinit();
-//! const exe = try compile_program(&program, "train_step");
+//! var traced = try zg.trace(train_step, allocator, specs, .{ .name = "train_step" });
+//! defer traced.deinit();
+//! const exe = try pipeline.run(zg.Executor.LoadedProgram, &traced.program, &ctx);
 //! ```
 const std = @import("std");
 const pr = @import("pr/pr.zig");
@@ -178,16 +178,7 @@ pub fn value_and_grad(
     }
     const selected_var = output_vars[selected_output];
     if (selected_var.as_tensor().shape.rank() != 0) return error.NonScalarOutput;
-    const source_func = try source_builder.finish(output_vars);
-
-    // Register the source function in the program. The VJP function replays the forward
-    //  equations internally (it needs intermediates for the backward pass), so this
-    //  function is never called at runtime. We keep it in the program for IR
-    //  debuggability (eg MLIR dumps show the clean forward pass as a readable
-    //  reference alongside the larger VJP function).
-    // TODO(ad): Call the registered source function from VJP instead of replaying
-    //  its operations.
-    _ = try program.add_function(source_func);
+    const source_id = try program.add_function(try source_builder.finish(output_vars));
 
     // Request gradients only for the selected argument's leaves.
     //  `wrt` filters the VJP function's output list: cotangents for
@@ -197,11 +188,10 @@ pub fn value_and_grad(
     //  become dead and are cleaned up by the backend's DCE.
     const wrt_indices = comptime selected_leaf_indices(ArgsType, opts.wrt_argnums);
     const vjp_name = try program.reserve_unique_function_name("vg_vjp");
-    const vjp_func = try ad.vjp_with_value(alloc, program, source_func, vjp_name, .{
+    const vjp_id = try ad.vjp_with_value(alloc, program, source_id, vjp_name, .{
         .of = &.{selected_output},
         .wrt = &wrt_indices,
     });
-    const vjp_id = try program.add_function(vjp_func);
 
     // Emit a ones-like cotangent for the selected scalar output in the outer builder.
     const cot = try ad.emit_cotangent(builder, selected_var.as_tensor());
@@ -214,7 +204,7 @@ pub fn value_and_grad(
     @memcpy(call_args[0..total_leaf_count], input_vars[0..total_leaf_count]);
     call_args[total_leaf_count] = cot;
 
-    const call_outputs = try builder.call(vjp_id, call_args);
+    const call_outputs = (try builder.call(vjp_id, call_args)).outputs;
     if (call_outputs.len != output_leaf_count + grad_leaf_count) return error.UnexpectedOutputs;
 
     const output_leaves = try alloc.alloc(Tensor, output_leaf_count);
@@ -258,7 +248,8 @@ pub fn value_and_grad(
 ///
 /// ```zig
 /// const grad_fn = comptime zg.grad(loss_fn, .{});
-/// var traced = try zg.trace(grad_fn, allocator, specs, "grad_step");
+/// var traced = try zg.trace(grad_fn, allocator, specs, .{ .name = "grad_step" });
+/// defer traced.deinit();
 /// ```
 pub fn make_grad(comptime func: anytype, comptime opts: GradOpts) GeneratedCall(.grad, func, opts) {
     return .{};
@@ -271,7 +262,8 @@ pub fn make_grad(comptime func: anytype, comptime opts: GradOpts) GeneratedCall(
 ///
 /// ```zig
 /// const vg_fn = comptime zg.value_and_grad(loss_fn, .{});
-/// var traced = try zg.trace(vg_fn, allocator, specs, "vg_step");
+/// var traced = try zg.trace(vg_fn, allocator, specs, .{ .name = "vg_step" });
+/// defer traced.deinit();
 /// ```
 pub fn make_value_and_grad(comptime func: anytype, comptime opts: GradOpts) GeneratedCall(.value_and_grad, func, opts) {
     return .{};
@@ -485,11 +477,11 @@ fn unsupported_loss(input: Tensor) !Tensor {
         else => return error.UnsupportedAval,
     };
     const input_var = try input.get_var();
-    const outputs = try builder.custom_call(.{
+    const outputs = (try builder.custom_call(.{
         .target_name = "test.missing_vjp",
         .has_side_effect = false,
         .payload = &.{},
-    }, &.{input_var}, &.{input_var.aval});
+    }, &.{input_var}, &.{input_var.aval})).outputs;
     return Tensor.from_var(builder, outputs[0]);
 }
 
@@ -527,11 +519,11 @@ test make_grad {
         },
     };
 
-    var program = try trace(grad_fn, std.testing.allocator, specs, "grad_test");
-    defer program.deinit();
+    var traced = try trace(grad_fn, std.testing.allocator, specs, .{ .name = "grad_test" });
+    defer traced.deinit();
 
     // grad returns only grads for first arg (2 leaves: w, b).
-    const grad_test = program.get_function("grad_test").?;
+    const grad_test = traced.program.get_function_by_id(try traced.program.resolve_entry()).?;
     try std.testing.expectEqual(2, grad_test.returns.len);
     try std.testing.expectEqual(3, grad_test.params.len);
 }
@@ -554,10 +546,10 @@ test "make_grad selects differentiated arguments in order" {
             .x = Tensor.abstract(.f32, &.{ 3, 4 }),
         },
     };
-    var program = try trace(grad_fn, std.testing.allocator, specs, "batch_grad_test");
-    defer program.deinit();
+    var traced = try trace(grad_fn, std.testing.allocator, specs, .{ .name = "batch_grad_test" });
+    defer traced.deinit();
 
-    const function = program.get_function("batch_grad_test").?;
+    const function = traced.program.get_function_by_id(try traced.program.resolve_entry()).?;
     try std.testing.expectEqual(@as(usize, 4), function.returns.len);
     try std.testing.expectEqualSlices(i64, &.{ 3, 4 }, function.returns[0].as_tensor().shape.dims);
     try std.testing.expectEqualSlices(i64, &.{ 4, 2 }, function.returns[1].as_tensor().shape.dims);
@@ -570,10 +562,10 @@ test "make_grad has no positional arity ceiling" {
     const scalar = Tensor.abstract(.f32, &.{});
     const specs = .{ scalar, scalar, scalar, scalar, scalar };
 
-    var program = try trace(grad_fn, std.testing.allocator, specs, "five_arg_grad_test");
-    defer program.deinit();
+    var traced = try trace(grad_fn, std.testing.allocator, specs, .{ .name = "five_arg_grad_test" });
+    defer traced.deinit();
 
-    const five_arg_grad_test = program.get_function("five_arg_grad_test").?;
+    const five_arg_grad_test = traced.program.get_function_by_id(try traced.program.resolve_entry()).?;
     try std.testing.expectEqual(@as(usize, 1), five_arg_grad_test.returns.len);
     try std.testing.expectEqual(@as(usize, 5), five_arg_grad_test.params.len);
 }
@@ -596,11 +588,11 @@ test make_value_and_grad {
         },
     };
 
-    var program = try trace(vg_fn, std.testing.allocator, specs, "vg_test");
-    defer program.deinit();
+    var traced = try trace(vg_fn, std.testing.allocator, specs, .{ .name = "vg_test" });
+    defer traced.deinit();
 
     // value_and_grad returns value (1 tensor) + grads for first arg (2 leaves).
-    const vg_test = program.get_function("vg_test").?;
+    const vg_test = traced.program.get_function_by_id(try traced.program.resolve_entry()).?;
     try std.testing.expectEqual(3, vg_test.returns.len);
     try std.testing.expectEqual(3, vg_test.params.len);
 }
@@ -623,10 +615,10 @@ test "make_value_and_grad preserves structured outputs and selects by path" {
         },
     };
 
-    var program = try trace(vg_fn, std.testing.allocator, specs, "structured_vg_test");
-    defer program.deinit();
+    var traced = try trace(vg_fn, std.testing.allocator, specs, .{ .name = "structured_vg_test" });
+    defer traced.deinit();
 
-    const structured_vg_test = program.get_function("structured_vg_test").?;
+    const structured_vg_test = traced.program.get_function_by_id(try traced.program.resolve_entry()).?;
     try std.testing.expectEqual(@as(usize, 4), structured_vg_test.returns.len);
     try std.testing.expectEqual(@as(usize, 3), structured_vg_test.params.len);
 }

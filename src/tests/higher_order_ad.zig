@@ -19,14 +19,14 @@ test "second derivative executes through generated calls" {
     const second = comptime transforms.make_grad(first, .{});
     const specs = .{Tensor.abstract(.f32, &.{})};
 
-    var program = try trace(second, std.testing.allocator, specs, "second_derivative");
-    defer program.deinit();
-    try pr.validate_program(&program);
+    var traced = try trace(second, std.testing.allocator, specs, .{ .name = "second_derivative" });
+    defer traced.deinit();
+    try pr.validate_program(&traced.program);
 
     var input = try pr_eval.HostTensor.init_with_data(std.testing.allocator, &.{}, &.{3.0});
     defer input.deinit();
-    const entry = program.get_function("second_derivative").?;
-    const results = try pr_eval.eval(std.testing.allocator, &program, entry, &.{input});
+    const entry = traced.program.get_function_by_id(try traced.program.resolve_entry()).?;
+    const results = try pr_eval.eval(std.testing.allocator, &traced.program, entry, &.{input});
     defer {
         for (results) |*result| result.deinit();
         std.testing.allocator.free(results);
@@ -40,14 +40,14 @@ test "generated gradients compose recursively" {
     const third = comptime transforms.make_grad(second, .{});
     const specs = .{Tensor.abstract(.f32, &.{})};
 
-    var program = try trace(third, std.testing.allocator, specs, "third_derivative");
-    defer program.deinit();
-    try pr.validate_program(&program);
+    var traced = try trace(third, std.testing.allocator, specs, .{ .name = "third_derivative" });
+    defer traced.deinit();
+    try pr.validate_program(&traced.program);
 
     var input = try pr_eval.HostTensor.init_with_data(std.testing.allocator, &.{}, &.{3.0});
     defer input.deinit();
-    const entry = program.get_function("third_derivative").?;
-    const results = try pr_eval.eval(std.testing.allocator, &program, entry, &.{input});
+    const entry = traced.program.get_function_by_id(try traced.program.resolve_entry()).?;
+    const results = try pr_eval.eval(std.testing.allocator, &traced.program, entry, &.{input});
     defer {
         for (results) |*result| result.deinit();
         std.testing.allocator.free(results);

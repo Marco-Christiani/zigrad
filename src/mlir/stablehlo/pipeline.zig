@@ -7,9 +7,6 @@ const lower = @import("lower.zig");
 
 /// Operations and lowering policy for the default StableHLO segment.
 pub const Options = struct {
-    /// PR function lowered as the StableHLO entry point.
-    entry_name: []const u8,
-
     /// StableHLO serialization passed to the next operation.
     encoding: stablehlo.Encoding = .binary,
 };
@@ -23,7 +20,6 @@ pub fn add(
     try pipeline.add(pr.transform.outline.Pass{});
     try pipeline.add(lower.Lower{
         .config = .{
-            .entry_name = options.entry_name,
             .encoding = options.encoding,
         },
     });

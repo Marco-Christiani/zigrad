@@ -157,12 +157,7 @@ fn run_pjrt(
         .device = execution.interface.device,
     };
     var backend = zg.pjrt.Backend.init(&execution, .{});
-    var pipeline = try zg.pjrt.pipeline.create(allocator, &backend, .{
-        .stablehlo = .{ .entry_name = "train_step" },
-    });
-    defer pipeline.deinit();
-
-    return try run_training(allocator, steps, &pipeline, &ctx);
+    return try run_training(allocator, steps, .{ .pjrt = &backend }, &ctx);
 }
 
 fn run_iree(
@@ -181,40 +176,42 @@ fn run_iree(
         .io = io,
         .device = execution.interface.device,
     };
-    var pipeline = try zg.iree.pipeline.create(allocator, .{ .loaded = &backend }, .{
-        .stablehlo = .{ .entry_name = "train_step" },
-    });
-    defer pipeline.deinit();
-
-    return try run_training(allocator, steps, &pipeline, &ctx);
+    return try run_training(allocator, steps, .{ .iree = &backend }, &ctx);
 }
+
+const TrainingBackend = union(enum) {
+    pjrt: *zg.pjrt.Backend,
+    iree: *zg.iree.Backend,
+};
 
 fn run_training(
     allocator: std.mem.Allocator,
     steps: usize,
-    pipeline: *zg.Pipeline,
+    backend: TrainingBackend,
     ctx: *zg.CompilationCtx,
 ) !void {
     std.log.info("compiling train_step...", .{});
-    var traced = try zg.trace_callable(
+    var traced = try zg.trace(
         train_step,
         allocator,
         .{ params_spec, batch_spec },
-        .{ .entry_name = "train_step", .donate = &.{0} },
+        .{ .name = "train_step" },
     );
     defer traced.deinit();
+
+    var pipeline = switch (backend) {
+        .pjrt => |selected| try zg.pjrt.pipeline.create(allocator, selected, .{}),
+        .iree => |selected| try zg.iree.pipeline.create(allocator, .{ .loaded = selected }, .{}),
+    };
+    defer pipeline.deinit();
 
     var loaded_program = try pipeline.run(
         zg.Executor.LoadedProgram,
         &traced.program,
         ctx,
     );
+    defer loaded_program.deinit();
     const executor = loaded_program.executor;
-    var step_fn = traced.bind(loaded_program) catch |err| {
-        loaded_program.deinit();
-        return err;
-    };
-    defer step_fn.deinit();
 
     std.log.info("generating synthetic data...", .{});
     var spec_tree = try zg.utils.Tree(Tensor).from(allocator, .{ params_spec, batch_spec });
@@ -236,31 +233,38 @@ fn run_training(
             return try t.to_device(selected_executor);
         }
     }.f);
-    // Tensor buffer ownership transfers to `inputs`, so only tree arrays are freed here.
+    // TrainState owns the device buffers, so only tree storage is released here.
     defer dev_tensors.deinit();
 
-    // Recover structured input from the flat device tensor tree.
-    // InputType is derived from the compiled function.
-    var inputs = try dev_tensors.extract(@TypeOf(step_fn).InputType);
+    const entry = traced.program.get_function_by_id(try traced.program.resolve_entry()) orelse return error.NoEntry;
+    const donated = comptime zg.train.donated_input_indices(
+        @TypeOf(.{ params_spec, batch_spec }),
+        &.{0},
+    );
+    var state = try zg.train.TrainState.init(
+        allocator,
+        loaded_program,
+        dev_tensors.leaves,
+        entry.returns.len,
+        .{ .donated_input_indices = donated },
+    );
+    defer state.deinit(.all);
 
     std.log.info("training for {} steps...", .{steps});
     for (0..steps) |step| {
-        // call() takes a pointer to inputs. Donated args (params at index 0)
-        //  are updated in place by swapping their buffers automatically.
-        //  Only non-donated outputs (loss) are returned.
-        var result = try step_fn.call(&inputs);
+        var result = try state.step();
+        defer result.loss.deinit();
+        if (result.event) |completion| {
+            defer executor.release_event(completion);
+            try executor.wait(completion);
+        }
 
-        const loss_val = try result.loss_val.item(f32);
+        const loss_val = try result.loss.item(f32);
 
         if (step % 10 == 0 or step == steps - 1) {
             std.log.info("step {d:>4}: loss = {d:.4}", .{ step, loss_val });
         }
-
-        result.loss_val.deinit();
     }
-
-    // Free all input buffers (final params from last step + batch data).
-    step_fn.deinit_inputs(&inputs);
 
     std.log.info("done", .{});
 }

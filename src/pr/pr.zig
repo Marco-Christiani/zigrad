@@ -29,6 +29,10 @@ pub const Shape = struct {
         for (self.dims) |d| count *= @intCast(d);
         return count;
     }
+
+    fn dupe(self: Shape, allocator: Allocator) Allocator.Error!Shape {
+        return .{ .dims = try allocator.dupe(i64, self.dims) };
+    }
 };
 
 /// Maximum rank stored by `BoundedShape`.
@@ -97,6 +101,13 @@ pub const BoundedShape = struct {
 pub const Aval = union(enum) {
     tensor: Tensor,
 
+    /// Copy this abstract value and its nested storage with `allocator`.
+    pub fn dupe(self: Aval, allocator: Allocator) Allocator.Error!Aval {
+        return switch (self) {
+            inline else => |s, t| @unionInit(Aval, @tagName(t), try s.dupe(allocator)),
+        };
+    }
+
     /// Extract the tensor type. Exhaustive over Aval variants.
     pub fn as_tensor(self: Aval) Tensor {
         return switch (self) {
@@ -113,6 +124,13 @@ pub const Aval = union(enum) {
 pub const Tensor = struct {
     dtype: DType,
     shape: Shape,
+
+    fn dupe(self: Tensor, allocator: Allocator) Allocator.Error!Tensor {
+        return .{
+            .dtype = self.dtype,
+            .shape = try self.shape.dupe(allocator),
+        };
+    }
 };
 
 /// Scalar constant keyed by its `DType`.
@@ -409,7 +427,57 @@ pub const Params = union(Prim) {
     reduce: ReduceParams,
     call: CallParams,
     custom_call: CustomCallParams,
+
+    fn dupe(self: Params, allocator: Allocator) Allocator.Error!Params {
+        return switch (self) {
+            inline else => |value, tag| @unionInit(
+                Params,
+                @tagName(tag),
+                try dupe_param_value(@TypeOf(value), allocator, value),
+            ),
+        };
+    }
 };
+
+fn dupe_param_value(comptime T: type, allocator: Allocator, value: T) Allocator.Error!T {
+    return switch (@typeInfo(T)) {
+        .void, .bool, .int, .float, .@"enum" => value,
+        .optional => |info| if (value) |payload|
+            try dupe_param_value(info.child, allocator, payload)
+        else
+            null,
+        .pointer => |info| blk: {
+            if (info.size != .slice)
+                @compileError("slices are the only supported pointer parameter type");
+            const result = try allocator.alloc(info.child, value.len);
+            for (value, result) |item, *stored|
+                stored.* = try dupe_param_value(info.child, allocator, item);
+            break :blk result;
+        },
+        .@"struct" => |info| blk: {
+            var result: T = undefined;
+            inline for (info.fields) |field|
+                @field(result, field.name) = try dupe_param_value(field.type, allocator, @field(value, field.name));
+            break :blk result;
+        },
+        .@"union" => |info| blk: {
+            const Tag = info.tag_type orelse
+                @compileError("PR parameters require tagged unions");
+            const tag = std.meta.activeTag(value);
+            inline for (info.fields) |field| {
+                if (tag == @field(Tag, field.name)) {
+                    break :blk @unionInit(
+                        T,
+                        field.name,
+                        try dupe_param_value(field.type, allocator, @field(value, field.name)),
+                    );
+                }
+            }
+            unreachable;
+        },
+        else => @compileError("unsupported PR parameter type: " ++ @typeName(T)),
+    };
+}
 
 /// SSA value with inline type and intrinsic use-list
 ///
@@ -460,18 +528,8 @@ pub const Var = struct {
 
     /// Replace all uses of this var with `new`. Transfers the use-list.
     pub fn replace_all_uses_with(self: *Var, new: *Var) void {
-        var cur = self.first_use;
-        while (cur) |use| {
-            const next = use.next;
-            use.value = new;
-            // unlink from self
-            use.prev = null;
-            use.next = new.first_use;
-            if (new.first_use) |head| head.prev = use;
-            new.first_use = use;
-            cur = next;
-        }
-        self.first_use = null;
+        if (self == new) return;
+        while (self.first_use) |use| use.set(new);
     }
 };
 
@@ -483,11 +541,23 @@ pub const Operand = struct {
     prev: ?*Operand = null,
     next: ?*Operand = null,
 
+    /// Initialize this stable operand slot and attach it to `value`'s use-list.
+    pub fn attach(self: *Operand, value: *Var, owner: *const Op, index: u32) void {
+        std.debug.assert(index < owner.inputs.len);
+        std.debug.assert(&owner.inputs[index] == self);
+        self.* = .{
+            .value = value,
+            .owner = owner,
+            .index = index,
+        };
+        self.link(value);
+    }
+
     /// Rebind this use-site to `new`, preserving def-use invariants.
     ///
-    /// This moves one `Operand` node from the old value's use-list to `new`'s use-list
-    ///  (inserted at head). List order is maintenance order, not program execution order,
-    ///  so its not really interpretable.
+    /// This moves one `Operand` node from the old value's use-list to the head
+    ///  of `new`'s use-list. List order maintains links and does not encode
+    ///  program execution order.
     ///
     /// Before:
     /// ```
@@ -501,31 +571,35 @@ pub const Operand = struct {
     /// new.first_use -> self <-> N1 <-> N2
     /// ```
     ///
-    /// Special case (self is old head):
-    ///   `old.first_use = self.next`
+    /// When `self` is the old head, `old.first_use` becomes `self.next`.
     ///
     /// ## ADR
     ///
-    /// Another intrusive linking design pattern is to use `prev: ?*?*Operand` which
-    ///  is what llvm does, but I find this less clear and not entirely sure why you
-    ///  would want this.
+    /// LLVM commonly stores `prev` as `?*?*Operand`. The direct previous-node
+    ///  pointer used here keeps unlinking explicit.
     pub fn set(self: *Operand, new: *Var) void {
         const old = self.value;
         if (old == new) return;
 
-        // unlink from old var's use-list
+        self.unlink(old);
+        self.value = new;
+        self.link(new);
+    }
+
+    fn unlink(self: *Operand, value: *Var) void {
         if (self.prev) |p| {
             p.next = self.next;
         } else {
-            old.first_use = self.next;
+            value.first_use = self.next;
         }
         if (self.next) |n| n.prev = self.prev;
-        // link into new var's use-list
-        self.value = new;
+    }
+
+    fn link(self: *Operand, value: *Var) void {
         self.prev = null;
-        self.next = new.first_use;
-        if (new.first_use) |head| head.prev = self;
-        new.first_use = self;
+        self.next = value.first_use;
+        if (value.first_use) |head| head.prev = self;
+        value.first_use = self;
     }
 };
 
@@ -671,6 +745,9 @@ pub const RegionIterator = struct {
 /// Owns an arena allocator that backs all IR nodes (Vars, Ops, Operands,
 ///  param slices, Functions). Call `deinit` to free everything in bulk.
 ///  Individual nodes are never freed separately.
+///
+/// A program may select one registered function as its compilation entry.
+/// `resolve_entry` infers the entry only when the call graph has one root.
 pub const Program = struct {
     arena: std.heap.ArenaAllocator,
     function_entries: std.MultiArrayList(FunctionEntry),
@@ -678,12 +755,22 @@ pub const Program = struct {
     function_id_by_name: std.StringHashMapUnmanaged(FunctionId),
     next_function_id: u64,
     reserved_function_names: std.ArrayList([]const u8),
+    /// Explicit compilation entry. A null value requests call-graph inference.
+    entry: ?FunctionId,
 
-    /// Append-only program state used to discard later functions and name
-    ///  reservations.
+    /// Errors reported when selecting a program entry function.
+    pub const EntryResolutionError = error{
+        NoFunctions,
+        NoRootFunction,
+        EntrySelectionRequired,
+        EntryFunctionMissing,
+    };
+
+    /// Program state restored when discarding appended construction work.
     pub const AppendCheckpoint = struct {
         function_count: usize,
         reservation_count: usize,
+        entry: ?FunctionId,
     };
 
     pub fn init(backing_allocator: std.mem.Allocator) Program {
@@ -694,6 +781,7 @@ pub const Program = struct {
             .function_id_by_name = .empty,
             .next_function_id = 0,
             .reserved_function_names = .empty,
+            .entry = null,
         };
     }
 
@@ -753,11 +841,12 @@ pub const Program = struct {
         functions_column[index] = func;
     }
 
-    /// Capture function and name-reservation counts for error cleanup.
+    /// Capture append-only state and entry selection for error cleanup.
     pub fn checkpoint_appends(self: *const Program) AppendCheckpoint {
         return .{
             .function_count = self.function_entries.len,
             .reservation_count = self.reserved_function_names.items.len,
+            .entry = self.entry,
         };
     }
 
@@ -776,12 +865,7 @@ pub const Program = struct {
         }
         self.function_entries.shrinkRetainingCapacity(saved.function_count);
         self.reserved_function_names.shrinkRetainingCapacity(saved.reservation_count);
-    }
-
-    /// Look up a function by name.
-    pub fn get_function(self: *const Program, name: []const u8) ?Function {
-        const id = self.get_function_id(name) orelse return null;
-        return self.get_function_by_id(id);
+        self.entry = saved.entry;
     }
 
     /// Look up a function identity by name.
@@ -793,6 +877,40 @@ pub const Program = struct {
     pub fn get_function_by_id(self: *const Program, id: FunctionId) ?Function {
         const index = self.function_index_by_id.get(id) orelse return null;
         return self.function_entries.slice().items(.function)[index];
+    }
+
+    /// Select the function used by compilation entrypoints.
+    pub fn set_entry(self: *Program, function: FunctionId) error{FunctionIdOutOfRange}!void {
+        if (!self.function_index_by_id.contains(function)) return error.FunctionIdOutOfRange;
+        self.entry = function;
+    }
+
+    /// Return the selected entry, or infer the only function not called by
+    ///  another function in the program.
+    pub fn resolve_entry(self: *const Program) EntryResolutionError!FunctionId {
+        if (self.entry) |entry| {
+            if (!self.function_index_by_id.contains(entry)) return error.EntryFunctionMissing;
+            return entry;
+        }
+        if (self.function_entries.len == 0) return error.NoFunctions;
+
+        var root: ?FunctionId = null;
+        for (self.function_ids()) |candidate| {
+            if (self.is_called_by_another_function(candidate)) continue;
+            if (root != null) return error.EntrySelectionRequired;
+            root = candidate;
+        }
+        return root orelse error.NoRootFunction;
+    }
+
+    fn is_called_by_another_function(self: *const Program, candidate: FunctionId) bool {
+        for (self.functions(), self.function_ids()) |func, caller| {
+            if (caller == candidate) continue;
+            for (func.ops) |op| {
+                if (op.params == .call and op.params.call.callee == candidate) return true;
+            }
+        }
+        return false;
     }
 
     /// Allocate and reserve a function name not present in the program.
@@ -871,6 +989,7 @@ pub const ValidationError = error{
     IotaTypeMismatch,
     DuplicateFunctionName,
     FunctionIdentityMismatch,
+    EntryFunctionMissing,
     ScatterAddTypeMismatch,
     DuplicateAnnotationName,
 };
@@ -897,6 +1016,9 @@ pub fn validate_program(program: *const Program) ValidationError!void {
     if (program.function_index_by_id.count() != program.functions().len or
         program.function_id_by_name.count() != program.functions().len)
         return error.FunctionIdentityMismatch;
+    if (program.entry) |entry| {
+        if (!program.function_index_by_id.contains(entry)) return error.EntryFunctionMissing;
+    }
     for (program.functions(), program.function_ids(), 0..) |func, id, i| {
         if (program.get_function_id(func.name) != id or
             program.function_index_by_id.get(id) != i or
@@ -990,12 +1112,40 @@ pub fn dupe_annotations(allocator: Allocator, annotations: []const Annotation) B
 /// Mutable builder for constructing a Function.
 ///
 /// All allocations go through the program arena.
-/// Slice parameters (dims, axes, permutations) are duped into the arena by
-///  convenience methods, so callers can pass stack-local slices.
+/// Operation parameters and caller-supplied result types are copied into the
+///  arena, so callers can pass stack-local slices.
 ///
 /// Use `push_region` / `pop_region` to annotate op ranges with compilation
 ///  hints (outlining, kernelization). Regions are materialized at `finish`.
 pub const FunctionBuilder = struct {
+    const ResultTypes = union(enum) {
+        /// Borrow abstract values already owned by the program.
+        borrow_avals: []const Aval,
+        /// Borrow abstract values from variables owned by the program.
+        borrow_vars: []const *Var,
+        /// Copy abstract values into the program.
+        copy_avals: []const Aval,
+
+        fn len(self: ResultTypes) usize {
+            return switch (self) {
+                inline else => |items| items.len,
+            };
+        }
+
+        fn set(
+            self: ResultTypes,
+            allocator: Allocator,
+            index: usize,
+            destination: *Aval,
+        ) Allocator.Error!void {
+            destination.* = switch (self) {
+                .borrow_avals => |avals| avals[index],
+                .borrow_vars => |vars| vars[index].aval,
+                .copy_avals => |avals| try avals[index].dupe(allocator),
+            };
+        }
+    };
+
     program: *Program,
     name: []const u8,
     params_list: std.ArrayList(*Var),
@@ -1106,76 +1256,81 @@ pub const FunctionBuilder = struct {
     ///  node linking it to the new op.
     pub fn emit(self: *FunctionBuilder, params: Params, inputs: []const *Var) BuildError!*Var {
         const a = self.alloc();
-
-        try self.ops_list.ensureUnusedCapacity(a, 1);
-        const out_aval = try ops.infer_output(a, params, inputs);
-        const operands = try a.alloc(Operand, inputs.len);
-        const op = try a.create(Op);
-        const out_slice = try a.alloc(*Var, 1);
-        const out_var = try self.create_var(out_aval);
-        out_slice[0] = out_var;
-
-        op.* = .{ .id = self.next_op(), .inputs = operands, .outputs = out_slice, .params = params };
-        out_var.defining_op = op;
-
-        for (inputs, 0..) |in_var, i| {
-            operands[i] = .{
-                .value = in_var,
-                .owner = op,
-                .index = @intCast(i),
-            };
-            operands[i].next = in_var.first_use;
-            if (in_var.first_use) |head| head.prev = &operands[i];
-            in_var.first_use = &operands[i];
-        }
-
-        self.ops_list.appendAssumeCapacity(op);
-        return out_var;
+        const stored_params = try params.dupe(a);
+        const out_aval = try ops.infer_output(a, stored_params, inputs);
+        const op = try self.append_op(stored_params, inputs, .{ .borrow_avals = &.{out_aval} });
+        std.debug.assert(op.outputs.len == 1);
+        return op.outputs[0];
     }
 
-    /// Emit an operation with explicit output abstract values.
+    /// Append an operation and return its stable program-owned address.
     ///
-    /// Compiler transforms and variadic-result operations use this when result
-    ///  types cannot be inferred from inputs. Input use lists are updated.
-    pub fn emit_outputs(self: *FunctionBuilder, params: Params, inputs: []const *Var, out_avals: []const Aval) BuildError![]*Var {
+    /// All fallible work completes before ids or def-use chains change.
+    fn append_op(
+        self: *FunctionBuilder,
+        /// Parameters whose nested storage belongs to the program.
+        params: Params,
+        /// Program-owned input variables attached to the new operation.
+        inputs: []const *Var,
+        /// Result abstract values and the policy for borrowing or copying them.
+        result_types: ResultTypes,
+    ) BuildError!*Op {
         const a = self.alloc();
 
         try self.ops_list.ensureUnusedCapacity(a, 1);
-        const out_vars = try a.alloc(*Var, out_avals.len);
-        const vars = try a.alloc(Var, out_avals.len);
+        const out_vars = try a.alloc(*Var, result_types.len());
+        const vars = try a.alloc(Var, result_types.len());
         const operands = try a.alloc(Operand, inputs.len);
         const op = try a.create(Op);
 
-        for (out_avals, vars, out_vars) |aval, *out_var, *out_var_ptr| {
-            out_var.* = .{ .id = self.next_id(), .aval = aval };
+        for (vars, 0..) |*out_var, index|
+            try result_types.set(a, index, &out_var.aval);
+
+        for (vars, out_vars) |*out_var, *out_var_ptr| {
+            const aval = out_var.aval;
+            out_var.* = .{
+                .id = self.next_id(),
+                .aval = aval,
+                .defining_op = op,
+            };
             out_var_ptr.* = out_var;
         }
 
         op.* = .{ .id = self.next_op(), .inputs = operands, .outputs = out_vars, .params = params };
-        for (out_vars) |v| v.defining_op = op;
-
-        for (inputs, 0..) |in_var, i| {
-            operands[i] = .{
-                .value = in_var,
-                .owner = op,
-                .index = @intCast(i),
-            };
-            operands[i].next = in_var.first_use;
-            if (in_var.first_use) |head| head.prev = &operands[i];
-            in_var.first_use = &operands[i];
-        }
+        for (inputs, operands, 0..) |input, *operand, index|
+            operand.attach(input, op, @intCast(index));
 
         self.ops_list.appendAssumeCapacity(op);
-        return out_vars;
+        return op;
+    }
+
+    /// Replay `source` as a new operation and return it.
+    pub fn replay_op(
+        self: *FunctionBuilder,
+        /// Operation to replay. Parameter and abstract-value slices are
+        ///  borrowed, so `source` must belong to the builder's program.
+        source: *const Op,
+        /// Builder-owned values corresponding to `source.inputs` in order.
+        inputs: []const *Var,
+    ) BuildError!*Op {
+        if (inputs.len != source.inputs.len) return error.InvalidOpArity;
+        return try self.append_op(source.params, inputs, .{ .borrow_vars = source.outputs });
+    }
+
+    /// Append a parameter with the given abstract value.
+    pub fn param_like(self: *FunctionBuilder, aval: Aval) BuildError!*Var {
+        const a = self.alloc();
+        try self.params_list.ensureUnusedCapacity(a, 1);
+        const v = try self.create_var(try aval.dupe(a));
+        self.params_list.appendAssumeCapacity(v);
+        return v;
     }
 
     pub fn param_tensor(self: *FunctionBuilder, dtype: DType, dims: []const i64) BuildError!*Var {
-        const a = self.alloc();
-        try self.params_list.ensureUnusedCapacity(a, 1);
-        const dims_copy = try a.dupe(i64, dims);
-        const v = try self.create_var(.{ .tensor = .{ .dtype = dtype, .shape = .{ .dims = dims_copy } } });
-        self.params_list.appendAssumeCapacity(v);
-        return v;
+        return try self.param_like(.{ .tensor = .{
+            .dtype = dtype,
+            .shape = .{ .dims = dims },
+        } });
     }
 
     pub fn literal_scalar(self: *FunctionBuilder, value: Literal) BuildError!*Var {
@@ -1240,34 +1395,15 @@ pub const FunctionBuilder = struct {
     }
 
     pub fn gather(self: *FunctionBuilder, operand_var: *Var, indices: *Var, gp: GatherParams) BuildError!*Var {
-        const a = self.alloc();
-        return try self.emit(.{ .gather = .{
-            .slice_sizes = try a.dupe(i64, gp.slice_sizes),
-            .offset_dims = try a.dupe(i64, gp.offset_dims),
-            .collapsed_slice_dims = try a.dupe(i64, gp.collapsed_slice_dims),
-            .start_index_map = try a.dupe(i64, gp.start_index_map),
-            .index_vector_dim = gp.index_vector_dim,
-        } }, &.{ operand_var, indices });
+        return try self.emit(.{ .gather = gp }, &.{ operand_var, indices });
     }
 
     pub fn scatter(self: *FunctionBuilder, input: *Var, indices: *Var, updates: *Var, sp: ScatterParams) BuildError!*Var {
-        const a = self.alloc();
-        return try self.emit(.{ .scatter = .{
-            .update_window_dims = try a.dupe(i64, sp.update_window_dims),
-            .inserted_window_dims = try a.dupe(i64, sp.inserted_window_dims),
-            .scatter_dims_to_operand_dims = try a.dupe(i64, sp.scatter_dims_to_operand_dims),
-            .index_vector_dim = sp.index_vector_dim,
-            .reduction = sp.reduction,
-        } }, &.{ input, indices, updates });
+        return try self.emit(.{ .scatter = sp }, &.{ input, indices, updates });
     }
 
     pub fn slice(self: *FunctionBuilder, operand_var: *Var, sp: SliceParams) BuildError!*Var {
-        const a = self.alloc();
-        return try self.emit(.{ .slice = .{
-            .start_indices = try a.dupe(i64, sp.start_indices),
-            .limit_indices = try a.dupe(i64, sp.limit_indices),
-            .strides = try a.dupe(i64, sp.strides),
-        } }, &.{operand_var});
+        return try self.emit(.{ .slice = sp }, &.{operand_var});
     }
 
     pub fn concatenate(self: *FunctionBuilder, operands: []const *Var, axis: i64) BuildError!*Var {
@@ -1275,13 +1411,7 @@ pub const FunctionBuilder = struct {
     }
 
     pub fn dot_general(self: *FunctionBuilder, lhs: *Var, rhs: *Var, dg: DotGeneralParams) BuildError!*Var {
-        const a = self.alloc();
-        return try self.emit(.{ .dot_general = .{
-            .lhs_batch_dims = try a.dupe(i64, dg.lhs_batch_dims),
-            .rhs_batch_dims = try a.dupe(i64, dg.rhs_batch_dims),
-            .lhs_contracting_dims = try a.dupe(i64, dg.lhs_contracting_dims),
-            .rhs_contracting_dims = try a.dupe(i64, dg.rhs_contracting_dims),
-        } }, &.{ lhs, rhs });
+        return try self.emit(.{ .dot_general = dg }, &.{ lhs, rhs });
     }
 
     /// Computes the scalar dot product of two equal-length vectors.
@@ -1300,50 +1430,27 @@ pub const FunctionBuilder = struct {
     }
 
     pub fn convolution(self: *FunctionBuilder, lhs: *Var, rhs: *Var, params: ConvolutionParams) BuildError!*Var {
-        const a = self.alloc();
-        return try self.emit(.{ .convolution = .{
-            .window_strides = try a.dupe(i64, params.window_strides),
-            .padding = try a.dupe(i64, params.padding),
-            .lhs_dilation = try a.dupe(i64, params.lhs_dilation),
-            .rhs_dilation = try a.dupe(i64, params.rhs_dilation),
-            .window_reversal = try a.dupe(bool, params.window_reversal),
-            .dimensions = .{
-                .input_batch_dimension = params.dimensions.input_batch_dimension,
-                .input_feature_dimension = params.dimensions.input_feature_dimension,
-                .input_spatial_dimensions = try a.dupe(i64, params.dimensions.input_spatial_dimensions),
-                .kernel_input_feature_dimension = params.dimensions.kernel_input_feature_dimension,
-                .kernel_output_feature_dimension = params.dimensions.kernel_output_feature_dimension,
-                .kernel_spatial_dimensions = try a.dupe(i64, params.dimensions.kernel_spatial_dimensions),
-                .output_batch_dimension = params.dimensions.output_batch_dimension,
-                .output_feature_dimension = params.dimensions.output_feature_dimension,
-                .output_spatial_dimensions = try a.dupe(i64, params.dimensions.output_spatial_dimensions),
-            },
-            .feature_group_count = params.feature_group_count,
-            .batch_group_count = params.batch_group_count,
-        } }, &.{ lhs, rhs });
+        return try self.emit(.{ .convolution = params }, &.{ lhs, rhs });
     }
 
     pub fn iota(self: *FunctionBuilder, out_dtype: DType, out_dims: []const i64, iota_dim: i64) BuildError!*Var {
-        const a = self.alloc();
         return try self.emit(.{ .iota = .{
-            .out_shape = try a.dupe(i64, out_dims),
+            .out_shape = out_dims,
             .out_dtype = out_dtype,
             .dimension = iota_dim,
         } }, &.{});
     }
 
     pub fn reshape(self: *FunctionBuilder, operand_var: *Var, out_dims: []const i64) BuildError!*Var {
-        const a = self.alloc();
         return try self.emit(.{ .reshape = .{
-            .out_shape = try a.dupe(i64, out_dims),
+            .out_shape = out_dims,
         } }, &.{operand_var});
     }
 
     pub fn broadcast_in_dim(self: *FunctionBuilder, operand_var: *Var, out_dims: []const i64, broadcast_dimensions: []const i64) BuildError!*Var {
-        const a = self.alloc();
         return try self.emit(.{ .broadcast_in_dim = .{
-            .out_shape = try a.dupe(i64, out_dims),
-            .dimensions = try a.dupe(i64, broadcast_dimensions),
+            .out_shape = out_dims,
+            .dimensions = broadcast_dimensions,
         } }, &.{operand_var});
     }
 
@@ -1357,43 +1464,33 @@ pub const FunctionBuilder = struct {
     }
 
     pub fn transpose(self: *FunctionBuilder, operand_var: *Var, permutation: []const i64) BuildError!*Var {
-        const a = self.alloc();
         return try self.emit(.{ .transpose = .{
-            .permutation = try a.dupe(i64, permutation),
+            .permutation = permutation,
         } }, &.{operand_var});
     }
 
     /// Reduces `operand_var` over the selected axes.
     pub fn reduce(self: *FunctionBuilder, operand_var: *Var, params: ReduceParams) BuildError!*Var {
-        const a = self.alloc();
-        return try self.emit(.{ .reduce = .{
-            .axes = try a.dupe(i64, params.axes),
-            .operation = params.operation,
-        } }, &.{operand_var});
+        return try self.emit(.{ .reduce = params }, &.{operand_var});
     }
 
-    /// Emit a custom call with explicit output types.
+    /// Emit and return a custom call.
     ///
-    /// The program arena copies the target name and payload.
+    /// The program owns copies of the parameters and result abstract values.
     pub fn custom_call(
         self: *FunctionBuilder,
         params: CustomCallParams,
         inputs: []const *Var,
         out_avals: []const Aval,
-    ) BuildError![]*Var {
-        const a = self.alloc();
-        const stored_params = CustomCallParams{
-            .target_name = try a.dupe(u8, params.target_name),
-            .has_side_effect = params.has_side_effect,
-            .payload = try a.dupe(u8, params.payload),
-        };
-        return try self.emit_outputs(.{ .custom_call = stored_params }, inputs, out_avals);
+    ) BuildError!*Op {
+        const stored_params = try (Params{ .custom_call = params }).dupe(self.alloc());
+        return try self.append_op(stored_params, inputs, .{ .copy_avals = out_avals });
     }
 
-    /// Emit a call to a function registered in the builder's program.
+    /// Emit and return a call to a function registered in the program.
     ///
     /// Input arity and tensor signatures must match the registered function.
-    pub fn call(self: *FunctionBuilder, callee_id: FunctionId, inputs: []const *Var) BuildError![]*Var {
+    pub fn call(self: *FunctionBuilder, callee_id: FunctionId, inputs: []const *Var) BuildError!*Op {
         const callee_fn = self.program.get_function_by_id(callee_id) orelse {
             pr_log.err("call references unknown function id {d}", .{@intFromEnum(callee_id)});
             return error.CallUnresolvedCallee;
@@ -1409,13 +1506,8 @@ pub const FunctionBuilder = struct {
             if (!same_tensor_signature(in_tensor, callee_tensor)) return error.CallTypeMismatch;
         }
 
-        const a = self.alloc();
-        const out_avals = try a.alloc(Aval, callee_fn.returns.len);
-        for (callee_fn.returns, 0..) |ret_var, i| {
-            out_avals[i] = ret_var.aval;
-        }
-
-        return try self.emit_outputs(.{ .call = .{ .callee = callee_id } }, inputs, out_avals);
+        const stored_params = try (Params{ .call = .{ .callee = callee_id } }).dupe(self.alloc());
+        return try self.append_op(stored_params, inputs, .{ .borrow_vars = callee_fn.returns });
     }
 
     /// Finalize and validate the function.
@@ -1508,8 +1600,8 @@ test "Program.restore discards appended functions and reservations" {
     program.restore_appends(saved);
     try std.testing.expectEqual(@as(usize, 1), program.functions().len);
     try std.testing.expectEqual(@as(usize, 0), program.checkpoint_appends().reservation_count);
-    try std.testing.expect(program.get_function("first") != null);
-    try std.testing.expect(program.get_function("second") == null);
+    try std.testing.expect(program.get_function_id("first") != null);
+    try std.testing.expect(program.get_function_id("second") == null);
     try std.testing.expect(program.get_function_by_id(@enumFromInt(1)) == null);
 
     var third = try FunctionBuilder.init(&program, "third");
@@ -1517,6 +1609,57 @@ test "Program.restore discards appended functions and reservations" {
     const third_id = try program.add_function(try third.finish(&.{}));
     try std.testing.expectEqual(@as(FunctionId, @enumFromInt(2)), third_id);
     try std.testing.expect(program.get_function_by_id(second_id) == null);
+}
+
+test "Program resolves explicit and unique-root entries" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var callee_builder = try FunctionBuilder.init(&program, "callee");
+    defer callee_builder.deinit();
+    const callee = try program.add_function(try callee_builder.finish(&.{}));
+
+    var caller_builder = try FunctionBuilder.init(&program, "caller");
+    defer caller_builder.deinit();
+    const call_op = try caller_builder.call(callee, &.{});
+    try std.testing.expectEqual(@as(usize, 0), call_op.outputs.len);
+    const caller = try program.add_function(try caller_builder.finish(&.{}));
+
+    try std.testing.expectEqual(caller, try program.resolve_entry());
+    try program.set_entry(callee);
+    try std.testing.expectEqual(callee, try program.resolve_entry());
+}
+
+test "Program requires selection among multiple roots" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    inline for (.{ "first", "second" }) |name| {
+        var builder = try FunctionBuilder.init(&program, name);
+        defer builder.deinit();
+        _ = try program.add_function(try builder.finish(&.{}));
+    }
+
+    try std.testing.expectError(error.EntrySelectionRequired, program.resolve_entry());
+}
+
+test "Program checkpoint restores entry selection" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var first_builder = try FunctionBuilder.init(&program, "first");
+    defer first_builder.deinit();
+    const first = try program.add_function(try first_builder.finish(&.{}));
+    try program.set_entry(first);
+    const saved = program.checkpoint_appends();
+
+    var second_builder = try FunctionBuilder.init(&program, "second");
+    defer second_builder.deinit();
+    const second = try program.add_function(try second_builder.finish(&.{}));
+    try program.set_entry(second);
+
+    program.restore_appends(saved);
+    try std.testing.expectEqual(first, try program.resolve_entry());
 }
 
 test "FunctionBuilder reshape validation" {
@@ -1528,6 +1671,22 @@ test "FunctionBuilder reshape validation" {
 
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
     try std.testing.expectError(error.ReshapeTypeMismatch, b.reshape(x, &.{4}));
+}
+
+test "FunctionBuilder owns operation parameters" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var builder = try FunctionBuilder.init(&program, "main");
+    defer builder.deinit();
+
+    const input = try builder.param_tensor(.f32, &.{6});
+    var dims = [_]i64{ 2, 3 };
+    const output = try builder.reshape(input, &dims);
+    dims[0] = 7;
+
+    try std.testing.expectEqualSlices(i64, &.{ 2, 3 }, output.defining_op.?.params.reshape.out_shape);
+    _ = try builder.finish(&.{output});
 }
 
 test "FunctionBuilder broadcast_in_dim basic" {
@@ -1854,4 +2013,24 @@ test "Var.replace_all_uses_with" {
     try std.testing.expect(x.is_unused());
     // y now has the uses that x had plus its original use
     try std.testing.expect(y.has_n_uses(3));
+
+    y.replace_all_uses_with(y);
+    try std.testing.expect(y.has_n_uses(3));
+}
+
+test "FunctionBuilder.custom_call owns output abstract values" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var builder = try FunctionBuilder.init(&program, "main");
+    defer builder.deinit();
+
+    var dims = [_]i64{ 2, 3 };
+    const call_op = try builder.custom_call(.{ .target_name = "example", .has_side_effect = false }, &.{}, &.{.{
+        .tensor = .{ .dtype = .f32, .shape = .{ .dims = &dims } },
+    }});
+    dims[0] = 7;
+
+    try std.testing.expectEqualSlices(i64, &.{ 2, 3 }, call_op.outputs[0].aval.as_tensor().shape.dims);
+    _ = try builder.finish(call_op.outputs);
 }

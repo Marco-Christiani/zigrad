@@ -221,9 +221,13 @@ pub fn emit_binding(self: *Self, op: *const pr.Op) !void {
 
     try self.writer.writeAll(")");
 
-    // VJP annotation
-    if (ops.has_vjp(prim)) {
-        try self.styler.write_comment("  ; vjp");
+    // VJP/JVP annotation
+    const has_vjp = ops.has_local_vjp(prim);
+    const has_jvp = ops.has_local_jvp(prim);
+    if (!has_vjp or !has_jvp) {
+        try self.styler.write_comment("  ;");
+        if (!has_jvp) try self.styler.write_comment(" !jvp");
+        if (!has_vjp) try self.styler.write_comment(" !vjp");
     }
 }
 

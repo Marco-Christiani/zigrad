@@ -78,17 +78,13 @@ pub fn run_llm_train_demo(
         .y = Tensor.abstract(.f32, &.{ bs, vocab }),
     };
     const inputs_spec = .{ params_spec, batch_spec };
-    const donate = comptime zg.train.donate_argnums(@TypeOf(inputs_spec), &.{0});
+    const donated = comptime zg.train.donated_input_indices(@TypeOf(inputs_spec), &.{0});
 
     const train = zg.train;
-    var program = try zg.trace(Fns.train_step, allocator, inputs_spec, "llm_ft_step");
-    defer program.deinit();
+    var traced = try zg.trace(Fns.train_step, allocator, inputs_spec, .{ .name = "llm_ft_step" });
+    defer traced.deinit();
 
-    var exe = try pipeline.run(
-        zg.Executor.LoadedProgram,
-        &program,
-        ctx,
-    );
+    var exe = try pipeline.run(zg.Executor.LoadedProgram, &traced.program, ctx);
     defer exe.deinit();
     const executor = exe.executor;
 
@@ -138,13 +134,13 @@ pub fn run_llm_train_demo(
     const dev_x = try host_x.to_device(executor);
     const dev_y = try host_y.to_device(executor);
 
-    const entry_function = program.get_function("llm_ft_step") orelse return error.NoEntry;
+    const entry_function = traced.program.get_function_by_id(try traced.program.resolve_entry()) orelse return error.NoEntry;
     var state = try train.TrainState.init(
         allocator,
         exe,
         &.{ dev_w_emb, dev_w_out, dev_b, dev_x, dev_y },
         entry_function.returns.len,
-        .{ .non_donatable_input_indices = donate },
+        .{ .donated_input_indices = donated },
     );
     defer state.deinit(.all);
 

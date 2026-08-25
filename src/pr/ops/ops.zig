@@ -1,14 +1,14 @@
 //! Registers op implementations and provides runtime dispatch.
 //!
 //! - `OpFor(prim)`: map from `pr.Prim` enum variant to its implementation struct.
-//! - Runtime dispatch helpers (`validate`, `infer_output`, `emit_primal`, ...)
+//! - Runtime dispatch helpers (`validate`, `infer_output`, `vjp`, ...)
 //!
 //! ## Op interface
 //!
 //! Every op implementation is a struct with methods named per `op_methods`
 //!  below. `validate` and `infer_output` are required. Missing them fails the
 //!  build via the `validate_op_interface` comptime block. The others
-//!  (`format`, `emit_primal`, `vjp`, `jvp`) are optional and probed
+//!  (`format`, `vjp`, `jvp`) are optional and probed
 //!  via `@hasDecl` at dispatch time.
 //!
 //! Coverage: build with `-Demit-op-coverage=true` to have the registry
@@ -18,6 +18,7 @@
 const std = @import("std");
 const pr = @import("../pr.zig");
 const build_options = @import("build_options");
+const log = std.log.scoped(.@"zg/ops");
 
 pub const types = @import("types.zig");
 pub const constant = @import("constant.zig");
@@ -82,7 +83,6 @@ const op_methods: []const MethodSpec = &.{
     // TODO(pr): Make inference optional for operations with explicit result types.
     .{ .name = "infer_output", .required = true, .doc = "Shape/dtype inference" },
     .{ .name = "format", .required = false, .doc = "IR dump formatting" },
-    .{ .name = "emit_primal", .required = false, .doc = "Primal re-emission for AD" },
     .{ .name = "vjp", .required = false, .doc = "Cotangent propagation for reverse-mode AD" },
     .{ .name = "jvp", .required = false, .doc = "Tangent propagation for forward-mode AD" },
 };
@@ -174,31 +174,11 @@ pub fn infer_output(alloc: std.mem.Allocator, params: pr.Params, inputs: []const
     }
 }
 
-/// Check if an op supports VJP by providing `emit_primal` and `vjp`.
-pub fn has_vjp(prim: pr.Prim) bool {
+/// Check if an op provides a local VJP rule.
+pub fn has_local_vjp(prim: pr.Prim) bool {
     return switch (prim) {
-        inline else => |p| @hasDecl(OpFor(p), "emit_primal") and @hasDecl(OpFor(p), "vjp"),
+        inline else => |p| @hasDecl(OpFor(p), "vjp"),
     };
-}
-
-/// Check if an op can emit its primal computation into an AD-derived function.
-pub fn has_emit_primal(prim: pr.Prim) bool {
-    return switch (prim) {
-        inline else => |p| @hasDecl(OpFor(p), "emit_primal"),
-    };
-}
-
-/// Emit an op's primal computation into an AD-derived function.
-pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op) types.AdError!void {
-    switch (op.params) {
-        inline else => |typed_params, tag| {
-            const Handler = OpFor(tag);
-            if (@hasDecl(Handler, "emit_primal")) {
-                return try Handler.emit_primal(ctx, op, typed_params);
-            }
-            return error.UnsupportedEqn;
-        },
-    }
 }
 
 /// Execute VJP backward pass for an op.
@@ -209,7 +189,10 @@ pub fn vjp(ctx: types.AdContext, op: *const pr.Op) types.AdError!void {
             if (@hasDecl(Handler, "vjp")) {
                 return try Handler.vjp(ctx, op, typed_params);
             }
-            if (requires_vjp(ctx, op)) return error.UnsupportedEqn;
+            if (requires_vjp(ctx, op)) {
+                if (!@import("builtin").is_test) log.err("{s} has no local VJP rule", .{@tagName(tag)});
+                return error.UnsupportedEqn;
+            }
             return;
         },
     }
@@ -240,10 +223,10 @@ fn is_differentiable(dtype: pr.DType) bool {
     };
 }
 
-/// Check if an op supports JVP through both required AD hooks.
-pub fn has_jvp(prim: pr.Prim) bool {
+/// Check if an op provides a local JVP rule.
+pub fn has_local_jvp(prim: pr.Prim) bool {
     return switch (prim) {
-        inline else => |p| @hasDecl(OpFor(p), "emit_primal") and @hasDecl(OpFor(p), "jvp"),
+        inline else => |p| @hasDecl(OpFor(p), "jvp"),
     };
 }
 
@@ -255,6 +238,7 @@ pub fn jvp(ctx: types.AdContext, op: *const pr.Op) types.AdError!void {
             if (@hasDecl(Handler, "jvp")) {
                 return try Handler.jvp(ctx, op, typed_params);
             }
+            if (!@import("builtin").is_test) log.warn("{s} has no local JVP rule", .{@tagName(tag)});
             return error.UnsupportedEqn;
         },
     }
@@ -268,43 +252,43 @@ pub fn format(writer: *types.Writer, op: *const pr.Op) types.FormatError!void {
             if (@hasDecl(Handler, "format")) {
                 return try Handler.format(writer, op, typed_params);
             }
+            log.debug("{s} does not implement format()", .{@tagName(tag)});
             return;
         },
     }
 }
 
-test "vjp support detection" {
-    try std.testing.expect(has_vjp(.add));
-    try std.testing.expect(has_vjp(.subtract));
-    try std.testing.expect(has_vjp(.multiply));
-    try std.testing.expect(has_vjp(.divide));
-    try std.testing.expect(has_vjp(.dot));
-    try std.testing.expect(has_vjp(.mm));
-    try std.testing.expect(has_vjp(.bmm));
-    try std.testing.expect(has_vjp(.reshape));
-    try std.testing.expect(has_vjp(.transpose));
-    try std.testing.expect(has_vjp(.broadcast_in_dim));
-    try std.testing.expect(has_vjp(.reduce));
-    try std.testing.expect(has_vjp(.exp));
-    try std.testing.expect(has_vjp(.log));
-    try std.testing.expect(has_vjp(.rsqrt));
-    try std.testing.expect(has_vjp(.logistic));
-    try std.testing.expect(has_vjp(.gather));
-    try std.testing.expect(has_vjp(.select));
-    try std.testing.expect(has_vjp(.dot_general));
-    try std.testing.expect(has_vjp(.slice));
-    try std.testing.expect(has_vjp(.concatenate));
+test "local vjp support detection" {
+    try std.testing.expect(has_local_vjp(.add));
+    try std.testing.expect(has_local_vjp(.subtract));
+    try std.testing.expect(has_local_vjp(.multiply));
+    try std.testing.expect(has_local_vjp(.divide));
+    try std.testing.expect(has_local_vjp(.dot));
+    try std.testing.expect(has_local_vjp(.mm));
+    try std.testing.expect(has_local_vjp(.bmm));
+    try std.testing.expect(has_local_vjp(.reshape));
+    try std.testing.expect(has_local_vjp(.transpose));
+    try std.testing.expect(has_local_vjp(.broadcast_in_dim));
+    try std.testing.expect(has_local_vjp(.reduce));
+    try std.testing.expect(has_local_vjp(.exp));
+    try std.testing.expect(has_local_vjp(.log));
+    try std.testing.expect(has_local_vjp(.rsqrt));
+    try std.testing.expect(has_local_vjp(.logistic));
+    try std.testing.expect(has_local_vjp(.gather));
+    try std.testing.expect(has_local_vjp(.select));
+    try std.testing.expect(has_local_vjp(.dot_general));
+    try std.testing.expect(has_local_vjp(.slice));
+    try std.testing.expect(has_local_vjp(.concatenate));
 
-    try std.testing.expect(has_emit_primal(.literal));
-    try std.testing.expect(!has_vjp(.literal));
+    try std.testing.expect(!has_local_vjp(.literal));
 
-    try std.testing.expect(has_vjp(.convert));
+    try std.testing.expect(has_local_vjp(.convert));
 
-    try std.testing.expect(has_vjp(.maximum));
-    try std.testing.expect(!has_vjp(.scatter));
-    try std.testing.expect(!has_vjp(.compare));
-    try std.testing.expect(!has_vjp(.call));
-    try std.testing.expect(!has_vjp(.custom_call));
+    try std.testing.expect(has_local_vjp(.maximum));
+    try std.testing.expect(!has_local_vjp(.scatter));
+    try std.testing.expect(!has_local_vjp(.compare));
+    try std.testing.expect(!has_local_vjp(.call));
+    try std.testing.expect(!has_local_vjp(.custom_call));
 }
 
 test "vjp rejects a missing rule on an active differentiable path" {
@@ -314,11 +298,11 @@ test "vjp rejects a missing rule on an active differentiable path" {
     var source_builder = try pr.FunctionBuilder.init(&program, "source");
     defer source_builder.deinit();
     const input = try source_builder.param_tensor(.f32, &.{4});
-    const outputs = try source_builder.custom_call(.{
+    const outputs = (try source_builder.custom_call(.{
         .target_name = "test.missing_vjp",
         .has_side_effect = false,
         .payload = &.{},
-    }, &.{input}, &.{input.aval});
+    }, &.{input}, &.{input.aval})).outputs;
     const source = try source_builder.finish(outputs);
 
     var derived_builder = try pr.FunctionBuilder.init(&program, "derived");
@@ -346,39 +330,39 @@ test "vjp rejects a missing rule on an active differentiable path" {
     try vjp(context, source.ops[0]);
 }
 
-test "jvp support detection" {
-    try std.testing.expect(has_jvp(.add));
-    try std.testing.expect(has_jvp(.subtract));
-    try std.testing.expect(has_jvp(.multiply));
-    try std.testing.expect(has_jvp(.divide));
+test "local jvp support detection" {
+    try std.testing.expect(has_local_jvp(.add));
+    try std.testing.expect(has_local_jvp(.subtract));
+    try std.testing.expect(has_local_jvp(.multiply));
+    try std.testing.expect(has_local_jvp(.divide));
 
-    try std.testing.expect(has_jvp(.exp));
-    try std.testing.expect(has_jvp(.log));
-    try std.testing.expect(has_jvp(.rsqrt));
-    try std.testing.expect(has_jvp(.logistic));
-    try std.testing.expect(has_jvp(.convert));
+    try std.testing.expect(has_local_jvp(.exp));
+    try std.testing.expect(has_local_jvp(.log));
+    try std.testing.expect(has_local_jvp(.rsqrt));
+    try std.testing.expect(has_local_jvp(.logistic));
+    try std.testing.expect(has_local_jvp(.convert));
 
-    try std.testing.expect(has_jvp(.reshape));
-    try std.testing.expect(has_jvp(.transpose));
-    try std.testing.expect(has_jvp(.broadcast_in_dim));
-    try std.testing.expect(has_jvp(.reduce));
-    try std.testing.expect(has_jvp(.slice));
-    try std.testing.expect(has_jvp(.concatenate));
-    try std.testing.expect(has_jvp(.gather));
-    try std.testing.expect(has_jvp(.iota));
+    try std.testing.expect(has_local_jvp(.reshape));
+    try std.testing.expect(has_local_jvp(.transpose));
+    try std.testing.expect(has_local_jvp(.broadcast_in_dim));
+    try std.testing.expect(has_local_jvp(.reduce));
+    try std.testing.expect(has_local_jvp(.slice));
+    try std.testing.expect(has_local_jvp(.concatenate));
+    try std.testing.expect(has_local_jvp(.gather));
+    try std.testing.expect(has_local_jvp(.iota));
 
-    try std.testing.expect(has_jvp(.dot));
-    try std.testing.expect(has_jvp(.mm));
-    try std.testing.expect(has_jvp(.bmm));
-    try std.testing.expect(has_jvp(.dot_general));
+    try std.testing.expect(has_local_jvp(.dot));
+    try std.testing.expect(has_local_jvp(.mm));
+    try std.testing.expect(has_local_jvp(.bmm));
+    try std.testing.expect(has_local_jvp(.dot_general));
 
-    try std.testing.expect(has_jvp(.literal));
+    try std.testing.expect(has_local_jvp(.literal));
 
-    try std.testing.expect(has_jvp(.compare));
-    try std.testing.expect(has_jvp(.select));
+    try std.testing.expect(has_local_jvp(.compare));
+    try std.testing.expect(has_local_jvp(.select));
 
-    try std.testing.expect(!has_jvp(.maximum));
-    try std.testing.expect(!has_jvp(.scatter));
-    try std.testing.expect(!has_jvp(.call));
-    try std.testing.expect(!has_jvp(.custom_call));
+    try std.testing.expect(has_local_jvp(.maximum));
+    try std.testing.expect(!has_local_jvp(.scatter));
+    try std.testing.expect(!has_local_jvp(.call));
+    try std.testing.expect(!has_local_jvp(.custom_call));
 }

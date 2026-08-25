@@ -36,29 +36,23 @@ pub fn main(init: std.process.Init) !void {
 
     var execution = try zg.pjrt.Execution.init(&client, devices[0], .{});
     var backend = zg.pjrt.Backend.init(&execution, .{});
-    var pipeline = try zg.pjrt.pipeline.create(allocator, &backend, .{
-        .stablehlo = .{ .entry_name = "train_step" },
-    });
-    defer pipeline.deinit();
     var ctx = zg.CompilationCtx{
         .allocator = allocator,
         .io = init.io,
         .device = execution.interface.device,
     };
 
-    var traced = try zg.trace_callable(
+    var traced = try zg.trace(
         model.train_step,
         allocator,
         .{ model.params_spec, model.training_batch_spec },
-        .{ .entry_name = "train_step", .donate = &.{0} },
+        .{ .name = "train_step" },
     );
     defer traced.deinit();
+    var pipeline = try zg.pjrt.pipeline.create(allocator, &backend, .{});
+    defer pipeline.deinit();
     var loaded = try pipeline.run(zg.Executor.LoadedProgram, &traced.program, &ctx);
-    var callable = traced.bind(loaded) catch |err| {
-        loaded.deinit();
-        return err;
-    };
-    defer callable.deinit();
+    defer loaded.deinit();
 
     var host_params = try parameters.initialize(allocator);
     defer parameters.deinit(&host_params);
@@ -66,7 +60,7 @@ pub fn main(init: std.process.Init) !void {
     defer deinit_batch(&host_batch);
     fill_batch(&host_batch, dataset, 0);
 
-    var inputs: @TypeOf(callable).InputType = inputs: {
+    var runtime = runtime: {
         var device_params = try parameters.map(host_params, &execution.interface, struct {
             fn upload(executor: *zg.Executor, tensor: Tensor, comptime _: []const u8) !Tensor {
                 return try tensor.to_device(executor);
@@ -75,30 +69,52 @@ pub fn main(init: std.process.Init) !void {
         errdefer parameters.deinit(&device_params);
         var device_batch = try allocate_batch_on_device(&host_batch, &execution.interface);
         errdefer deinit_batch(&device_batch);
-        break :inputs .{ device_params, device_batch };
+
+        var inputs = try zg.utils.Tree(Tensor).from(allocator, .{ device_params, device_batch });
+        defer inputs.deinit();
+        const entry = traced.program.get_function_by_id(try traced.program.resolve_entry()) orelse return error.NoEntry;
+        const donated = comptime zg.train.donated_input_indices(
+            @TypeOf(.{ model.params_spec, model.training_batch_spec }),
+            &.{0},
+        );
+        const state = try zg.train.TrainState.init(
+            allocator,
+            loaded,
+            inputs.leaves,
+            entry.returns.len,
+            .{ .donated_input_indices = donated },
+        );
+        break :runtime .{ .state = state, .batch = device_batch };
     };
-    defer callable.deinit_inputs(&inputs);
+    defer runtime.state.deinit(.donatable);
+    defer deinit_batch(&runtime.batch);
 
     for (0..options.steps) |step| {
         if (step != 0) {
             fill_batch(&host_batch, dataset, step * @as(usize, @intCast(model.training_batch_size)));
-            var next_images = try host_batch.images.to_device(&execution.interface);
-            errdefer next_images.deinit();
-            const next_labels = try host_batch.labels.to_device(&execution.interface);
-            inputs[1].images.deinit();
-            inputs[1].labels.deinit();
-            inputs[1].images = next_images;
-            inputs[1].labels = next_labels;
+            const next_batch = try allocate_batch_on_device(&host_batch, &execution.interface);
+            runtime.state.set_batch(&.{ next_batch.images, next_batch.labels });
+            deinit_batch(&runtime.batch);
+            runtime.batch = next_batch;
         }
-        var result = try callable.call(&inputs);
-        defer result.loss_value.deinit();
-        const loss_value = try result.loss_value.item(f32);
+        var result = try runtime.state.step();
+        defer result.loss.deinit();
+        if (result.event) |completion| {
+            defer execution.interface.release_event(completion);
+            try execution.interface.wait(completion);
+        }
+        const loss_value = try result.loss.item(f32);
         if (step % 50 == 0 or step + 1 == options.steps) {
             std.log.info("step {d}: loss {d:.4}", .{ step, loss_value });
         }
     }
 
-    var trained = try download_params(allocator, inputs[0]);
+    const device_params = try params_from_buffers(
+        allocator,
+        &execution.interface,
+        runtime.state.input_buffers[0..runtime.state.donatable_count],
+    );
+    var trained = try download_params(allocator, device_params);
     defer parameters.deinit(&trained);
     const checkpoint = try zg.to_safetensors(model.Params, trained, allocator);
     defer allocator.free(checkpoint);
@@ -116,7 +132,7 @@ pub fn main(init: std.process.Init) !void {
             options.data_dir,
             &backend,
             &ctx,
-            inputs[0],
+            device_params,
         );
     }
 }
@@ -168,17 +184,15 @@ fn evaluate(
     if (dataset.len != file_size) return error.InvalidDataset;
     try dataset_format.validate(dataset);
 
-    var pipeline = try zg.pjrt.pipeline.create(allocator, backend, .{
-        .stablehlo = .{ .entry_name = "inference" },
-    });
-    defer pipeline.deinit();
-    var traced = try zg.trace_callable(
+    var traced = try zg.trace(
         model.forward,
         allocator,
         .{ model.params_spec, model.evaluation_images_spec },
-        .{ .entry_name = "inference" },
+        .{ .name = "inference" },
     );
     defer traced.deinit();
+    var pipeline = try zg.pjrt.pipeline.create(allocator, backend, .{});
+    defer pipeline.deinit();
     var loaded = try pipeline.run(zg.Executor.LoadedProgram, &traced.program, ctx);
     var callable = traced.bind(loaded) catch |err| {
         loaded.deinit();
@@ -255,6 +269,23 @@ fn fill_batch(batch: *model.Batch, dataset: []const u8, start_record: usize) voi
     const batch_size: usize = @intCast(model.training_batch_size);
     dataset_format.decode_images(batch.images.as_slice(f32), dataset, start_record, batch_size);
     dataset_format.decode_labels(batch.labels.as_slice(f32), dataset, start_record, batch_size);
+}
+
+fn params_from_buffers(
+    allocator: std.mem.Allocator,
+    executor: *zg.Executor,
+    buffers: []const zg.Executor.Buffer,
+) !model.Params {
+    var specs = try zg.utils.Tree(Tensor).from(allocator, model.params_spec);
+    defer specs.deinit();
+    if (buffers.len != specs.leaves.len) return error.InvalidOutputArity;
+
+    const leaves = try allocator.alloc(Tensor, buffers.len);
+    defer allocator.free(leaves);
+    for (specs.leaves, buffers, leaves) |spec, buffer, *tensor| {
+        tensor.* = Tensor.from_buffer(executor, buffer, spec.dtype, spec.shape.const_slice());
+    }
+    return zg.utils.Tree(Tensor).unflatten(model.Params, leaves);
 }
 
 fn download_params(allocator: std.mem.Allocator, params: model.Params) !model.Params {

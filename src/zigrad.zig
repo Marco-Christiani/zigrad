@@ -14,7 +14,6 @@ pub const compilation = @import("compilation.zig");
 pub const toolchain = @import("toolchain.zig");
 pub const backend = @import("backend.zig");
 pub const output = @import("output.zig");
-pub const callable = @import("callable.zig");
 pub const transforms = @import("transforms.zig");
 pub const optim = @import("optim.zig");
 pub const train = @import("train.zig");
@@ -65,8 +64,10 @@ pub const pjrt = if (build_options.has_pjrt) @import("pjrt.zig") else struct {};
 /// Optional IREE integration infrastructure.
 pub const iree = if (build_options.has_iree) @import("iree.zig") else struct {};
 
-pub const trace = @import("trace.zig").trace;
-pub const trace_callable = callable.trace_callable;
+const trace_mod = @import("trace.zig");
+pub const trace = trace_mod.trace;
+pub const trace_into = trace_mod.trace_into;
+pub const TraceOptions = trace_mod.Options;
 pub const grad = transforms.make_grad;
 pub const value_and_grad = transforms.make_value_and_grad;
 

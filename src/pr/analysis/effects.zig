@@ -44,16 +44,16 @@ test function_may_have_side_effects {
     var effectful_builder = try pr.FunctionBuilder.init(&program, "effectful");
     defer effectful_builder.deinit();
     const effectful_input = try effectful_builder.param_tensor(.f32, &.{2});
-    const effectful_outputs = try effectful_builder.custom_call(.{
+    const effectful_outputs = (try effectful_builder.custom_call(.{
         .target_name = "test.effectful",
         .has_side_effect = true,
-    }, &.{effectful_input}, &.{effectful_input.aval});
+    }, &.{effectful_input}, &.{effectful_input.aval})).outputs;
     const effectful_id = try program.add_function(try effectful_builder.finish(effectful_outputs));
 
     var caller_builder = try pr.FunctionBuilder.init(&program, "caller");
     defer caller_builder.deinit();
     const caller_input = try caller_builder.param_tensor(.f32, &.{2});
-    const caller_outputs = try caller_builder.call(effectful_id, &.{caller_input});
+    const caller_outputs = (try caller_builder.call(effectful_id, &.{caller_input})).outputs;
     const caller_id = try program.add_function(try caller_builder.finish(caller_outputs));
 
     try testing.expect(!function_may_have_side_effects(&program, program.functions()[0]));

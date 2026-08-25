@@ -113,7 +113,10 @@ fn emit_op_node(writer: *Writer, op: *const pr.Op, op_index: usize) !void {
     try writer.writeAll(",\"kind\":");
     try write_json_string(writer, @tagName(prim));
     try emit_param_attrs(writer, op);
-    if (ops.has_vjp(prim)) {
+    if (ops.has_local_jvp(prim)) {
+        try writer.writeAll(",\"jvp\":true");
+    }
+    if (ops.has_local_vjp(prim)) {
         try writer.writeAll(",\"vjp\":true");
     }
     if (op.outputs.len > 0) {
@@ -567,6 +570,7 @@ test emit {
     try std.testing.expect(std.mem.indexOf(u8, result, "\"id\":\"e0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"kind\":\"param\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"kind\":\"mm\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"jvp\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"vjp\":true") != null);
 
     // Param nodes have value-id labels
@@ -863,8 +867,8 @@ test "emit_program identifies monotonic call targets" {
     var caller = try pr.FunctionBuilder.init(&program, "caller");
     defer caller.deinit();
     const caller_input = try caller.param_tensor(.f32, &.{});
-    const outputs = try caller.call(callee_id, &.{caller_input});
-    _ = try program.add_function(try caller.finish(outputs));
+    const call_op = try caller.call(callee_id, &.{caller_input});
+    _ = try program.add_function(try caller.finish(call_op.outputs));
 
     var output: Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();

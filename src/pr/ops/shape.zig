@@ -50,15 +50,6 @@ pub const reshape = struct {
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = rp.out_shape } } };
     }
 
-    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: pr.ReshapeParams) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
-
-        const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const out_tensor = op.result(0).as_tensor();
-        const out = try ctx.builder.reshape(operand, out_tensor.shape.dims);
-        ctx.set_primal(op.result(0), out);
-    }
-
     pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: pr.ReshapeParams) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
@@ -124,12 +115,6 @@ pub const iota = struct {
         return .{ .tensor = .{ .dtype = ip.out_dtype, .shape = .{ .dims = ip.out_shape } } };
     }
 
-    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, ip: pr.IotaParams) types.AdError!void {
-        const out_tensor = op.result(0).as_tensor();
-        const out = try ctx.builder.iota(out_tensor.dtype, out_tensor.shape.dims, ip.dimension);
-        ctx.set_primal(op.result(0), out);
-    }
-
     /// JVP of iota is a zero tangent.
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: pr.IotaParams) types.AdError!void {
         const out_tensor = op.result(0).as_tensor();
@@ -177,14 +162,6 @@ pub const transpose = struct {
         const out_dims = try alloc.alloc(i64, operand.shape.rank());
         for (tp.permutation, 0..) |p, i| out_dims[i] = operand.shape.dims[@intCast(p)];
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
-    }
-
-    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, tp: pr.TransposeParams) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
-
-        const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const out = try ctx.builder.transpose(operand, tp.permutation);
-        ctx.set_primal(op.result(0), out);
     }
 
     pub fn vjp(ctx: types.AdContext, op: *const pr.Op, tp: pr.TransposeParams) types.AdError!void {
@@ -237,14 +214,6 @@ pub const slice = struct {
         const operand = inputs[0].as_tensor();
         const out_dims = try compute_slice_output_dims(alloc, operand.shape.dims, sparams);
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
-    }
-
-    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, sparams: pr.SliceParams) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
-
-        const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const out = try ctx.builder.slice(operand, sparams);
-        ctx.set_primal(op.result(0), out);
     }
 
     /// JVP: \(\mathrm{d}(\operatorname{slice}(x, p)) =
@@ -329,18 +298,6 @@ pub const concatenate = struct {
         return .{ .tensor = .{ .dtype = first.dtype, .shape = .{ .dims = out_dims } } };
     }
 
-    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, cp: pr.ConcatenateParams) types.AdError!void {
-        if (op.inputs.len == 0) return error.UnsupportedEqn;
-
-        var primals = try ctx.allocator.alloc(*pr.Var, op.inputs.len);
-        defer ctx.allocator.free(primals);
-        for (op.inputs, 0..) |operand, i| {
-            primals[i] = ctx.get_primal(operand.value) orelse return error.UnsupportedEqn;
-        }
-        const out = try ctx.builder.concatenate(primals, cp.axis);
-        ctx.set_primal(op.result(0), out);
-    }
-
     /// JVP: \(\mathrm{d}(\operatorname{concatenate}(x_s, \mathrm{axis})) =
     ///  \operatorname{concatenate}(\mathrm{d}x_s, \mathrm{axis})\).
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, cp: pr.ConcatenateParams) types.AdError!void {
@@ -420,14 +377,6 @@ pub const reduce = struct {
         const operand = inputs[0].as_tensor();
         const out_dims = try reduce_output_dims(alloc, operand.shape.dims, rp.axes);
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
-    }
-
-    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
-
-        const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const out = try ctx.builder.reduce(operand, rp);
-        ctx.set_primal(op.result(0), out);
     }
 
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
@@ -577,15 +526,6 @@ pub const gather = struct {
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
     }
 
-    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, gparams: pr.GatherParams) types.AdError!void {
-        if (op.inputs.len != 2) return error.UnsupportedEqn;
-
-        const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const indices = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
-        const out = try ctx.builder.gather(operand, indices, gparams);
-        ctx.set_primal(op.result(0), out);
-    }
-
     /// JVP: \(\mathrm{d}(\operatorname{gather}(x, \mathrm{idx}, p)) =
     ///  \operatorname{gather}(\mathrm{d}x, \mathrm{idx}, p)\).
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, gparams: pr.GatherParams) types.AdError!void {
@@ -670,14 +610,6 @@ pub const broadcast_in_dim = struct {
 
         try validate_broadcast_in_dim_op(operand, out_tensor, bp.dimensions);
         return .{ .tensor = out_tensor };
-    }
-
-    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, bp: pr.BroadcastInDimParams) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
-
-        const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const out = try ctx.builder.broadcast_in_dim(operand, bp.out_shape, bp.dimensions);
-        ctx.set_primal(op.result(0), out);
     }
 
     /// JVP: \(\mathrm{d}(\operatorname{broadcast\_in\_dim}(x, s, \mathrm{bd})) =

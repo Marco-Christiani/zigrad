@@ -14,7 +14,7 @@ pub const Config = struct {
     target: Target = .stdout,
 
     /// Labels output associated with one entry function.
-    entry_name: ?[]const u8 = null,
+    entry_label: ?[]const u8 = null,
 };
 
 /// Writes one output task to its selected destination.

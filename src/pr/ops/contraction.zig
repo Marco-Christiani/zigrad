@@ -39,15 +39,6 @@ pub const dot = struct {
         } } };
     }
 
-    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 2) return error.UnsupportedEqn;
-
-        const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
-        const out = try ctx.builder.dot(lhs, rhs);
-        ctx.set_primal(op.result(0), out);
-    }
-
     pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
@@ -146,16 +137,6 @@ fn matrix_multiply(comptime batched: bool) type {
             return .{ .tensor = .{ .dtype = lhs.dtype, .shape = .{ .dims = dims } } };
         }
 
-        pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-            const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-            const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
-            const out = if (batched)
-                try ctx.builder.bmm(lhs, rhs)
-            else
-                try ctx.builder.mm(lhs, rhs);
-            ctx.set_primal(op.result(0), out);
-        }
-
         pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
             const out_cot = ctx.get_cot(op.result(0)) orelse return;
             const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
@@ -241,12 +222,6 @@ pub const convolution = struct {
             .dtype = lhs.dtype,
             .shape = .{ .dims = try allocator.dupe(i64, computed) },
         } };
-    }
-
-    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, params: pr.ConvolutionParams) types.AdError!void {
-        const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
-        ctx.set_primal(op.result(0), try ctx.builder.convolution(lhs, rhs, params));
     }
 
     pub fn vjp(ctx: types.AdContext, op: *const pr.Op, params: pr.ConvolutionParams) types.AdError!void {
@@ -387,15 +362,6 @@ pub const dot_general = struct {
             return error.DotGeneralTypeMismatch;
         const out_dims = try alloc.dupe(i64, computed);
         return .{ .tensor = .{ .dtype = lhs.dtype, .shape = .{ .dims = out_dims } } };
-    }
-
-    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, dg_params: pr.DotGeneralParams) types.AdError!void {
-        if (op.inputs.len != 2) return error.UnsupportedEqn;
-
-        const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
-        const out = try ctx.builder.dot_general(lhs, rhs, dg_params);
-        ctx.set_primal(op.result(0), out);
     }
 
     /// VJP backward for dot_general.

@@ -116,11 +116,12 @@ const CompiledContext = struct {
         const b = try builder.param_tensor(pr_dtype, &.{ shape.k, shape.n });
         const result = try builder.mm(a, b);
         const function = try builder.finish(&.{result});
-        _ = try program.add_function(function);
+        const entry = try program.add_function(function);
+        try program.set_entry(entry);
 
         var pipeline = zg.Pipeline.init(self.allocator);
         defer pipeline.deinit();
-        try zg.mlir.stablehlo.pipeline.add(&pipeline, .{ .entry_name = "matmul" });
+        try zg.mlir.stablehlo.pipeline.add(&pipeline, .{});
         try pipeline.add(self.backend);
         return try pipeline.run(
             zg.Executor.LoadedProgram,

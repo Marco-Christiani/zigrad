@@ -20,7 +20,7 @@ const Writer = std.Io.Writer;
 /// Eight-byte marker at the start of every PR wire document.
 pub const magic = "ZGPRWIRE";
 /// Current PR wire format version.
-pub const version: u32 = 7;
+pub const version: u32 = 8;
 const header_size = magic.len + @sizeOf(u32) + @sizeOf(u64);
 
 // This count forces a wire-version decision when `Prim` or `Params` changes.
@@ -59,6 +59,7 @@ const DecodeError = Allocator.Error || error{
     DuplicateOpId,
     UnknownOpId,
     VarCountMismatch,
+    EntryOrdinalOutOfRange,
 };
 
 /// Errors produced while parsing or validating a PR wire document.
@@ -75,6 +76,11 @@ pub fn emit(program: *const pr.Program, writer: *Writer) EmitError!void {
     try writer.writeInt(u32, version, .little);
     try writer.writeInt(u64, schema_hash, .little);
     try write_length(writer, program.functions().len);
+    const entry_ordinal = if (program.entry) |entry|
+        function_ordinal(program, entry) orelse return error.UnknownFunctionId
+    else
+        null;
+    try write_value(?u32, writer, entry_ordinal);
 
     for (program.functions()) |func| {
         try write_value([]const u8, writer, func.name);
@@ -183,11 +189,18 @@ pub fn parse(backing_allocator: Allocator, bytes: []const u8) ParseError!pr.Prog
     const arena = program.allocator();
 
     const function_count = try reader.read_length();
+    const entry_ordinal = try read_value(?u32, &reader, arena);
+    if (entry_ordinal) |ordinal| {
+        if (ordinal >= function_count) return error.EntryOrdinalOutOfRange;
+    }
     const functions = try arena.alloc(pr.Function, function_count);
     for (functions) |*func| func.* = try read_function(&reader, arena);
     for (functions, 0..) |func, ordinal| {
         const id = try program.add_function(func);
         std.debug.assert(@intFromEnum(id) == ordinal);
+    }
+    if (entry_ordinal) |ordinal| {
+        program.set_entry(@enumFromInt(ordinal)) catch unreachable;
     }
 
     if (reader.pos != bytes.len) return error.TrailingData;
@@ -247,10 +260,10 @@ fn read_function(reader: *Reader, arena: Allocator) DecodeError!pr.Function {
             if (existing.id == id) return error.DuplicateOpId;
 
         const input_count = try reader.read_length();
-        const input_values = try arena.alloc(*pr.Var, input_count);
-        for (input_values) |*input_value| {
+        const inputs = try arena.alloc(pr.Operand, input_count);
+        for (inputs) |*operand| {
             const input_id = try reader.read_int(u32);
-            input_value.* = try lookup_var(vars, input_id);
+            operand.value = try lookup_var(vars, input_id);
         }
 
         const op = try arena.create(pr.Op);
@@ -260,7 +273,6 @@ fn read_function(reader: *Reader, arena: Allocator) DecodeError!pr.Function {
             output.* = try read_var_definition(reader, arena, vars, op);
 
         const params_payload = try read_params(reader, arena);
-        const inputs = try arena.alloc(pr.Operand, input_count);
         op.* = .{
             .id = id,
             .inputs = inputs,
@@ -269,15 +281,9 @@ fn read_function(reader: *Reader, arena: Allocator) DecodeError!pr.Function {
         };
         op_slot.* = op;
 
-        for (inputs, input_values, 0..) |*operand, value, index| {
-            operand.* = .{
-                .value = value,
-                .owner = op,
-                .index = @intCast(index),
-                .next = value.first_use,
-            };
-            if (value.first_use) |first_use| first_use.prev = operand;
-            value.first_use = operand;
+        for (inputs, 0..) |*operand, index| {
+            const value = operand.value;
+            operand.attach(value, op, @intCast(index));
         }
     }
 
@@ -490,7 +496,7 @@ pub const Reader = struct {
 fn compute_schema_hash() u64 {
     @setEvalBranchQuota(100_000);
     var hash: u64 = 14695981039346656037;
-    hash_bytes(&hash, "Program:[Function];Function:name,[Annotation],var_count,[param],[Op],[Region],[return];" ++
+    hash_bytes(&hash, "Program:function_count,?entry_ordinal,[Function];Function:name,[Annotation],var_count,[param],[Op],[Region],[return];" ++
         "param:id,dtype,dims;Op:id,[input id],[output],Params;" ++
         "Region:id,name,[Annotation],[op id];output:id,dtype,dims");
     hash_type(&hash, pr.DType);
@@ -620,17 +626,6 @@ fn make_test_program(backing_allocator: Allocator) !pr.Program {
     }
 
     const custom_inputs = try arena.alloc(pr.Operand, 2);
-    for (custom_inputs, 0..) |*input, index| {
-        input.* = .{
-            .value = literal_var,
-            .owner = custom_op,
-            .index = @intCast(index),
-            .prev = if (index == 0) &custom_inputs[1] else null,
-            .next = if (index == 0) null else &custom_inputs[0],
-        };
-    }
-    literal_var.first_use = &custom_inputs[1];
-
     custom_op.* = .{
         .id = 9,
         .inputs = custom_inputs,
@@ -641,6 +636,9 @@ fn make_test_program(backing_allocator: Allocator) !pr.Program {
             .payload = try arena.dupe(u8, "payload"),
         } },
     };
+    for (custom_inputs, 0..) |*input, index| {
+        input.attach(literal_var, custom_op, @intCast(index));
+    }
 
     const call_op = try arena.create(pr.Op);
     const call_var = try arena.create(pr.Var);
@@ -650,12 +648,6 @@ fn make_test_program(backing_allocator: Allocator) !pr.Program {
         .defining_op = call_op,
     };
     const call_inputs = try arena.alloc(pr.Operand, 1);
-    call_inputs[0] = .{
-        .value = custom_outputs[0],
-        .owner = call_op,
-        .index = 0,
-    };
-    custom_outputs[0].first_use = &call_inputs[0];
     const call_outputs = try arena.alloc(*pr.Var, 1);
     call_outputs[0] = call_var;
     call_op.* = .{
@@ -666,6 +658,7 @@ fn make_test_program(backing_allocator: Allocator) !pr.Program {
             .callee = @enumFromInt(1),
         } },
     };
+    call_inputs[0].attach(custom_outputs[0], call_op, 0);
 
     const function_ops = try arena.alloc(*pr.Op, 3);
     function_ops[0] = literal_op;
@@ -723,6 +716,7 @@ fn make_test_program(backing_allocator: Allocator) !pr.Program {
         const id = try program.add_function(func);
         std.debug.assert(@intFromEnum(id) == ordinal);
     }
+    try program.set_entry(@enumFromInt(0));
     return program;
 }
 
@@ -740,6 +734,7 @@ test "binary PR round trip is byte stable" {
     var parsed = try parse(std.testing.allocator, first_bytes);
     defer parsed.deinit();
     try pr.validate_program(&parsed);
+    try std.testing.expectEqual(@as(pr.FunctionId, @enumFromInt(0)), try parsed.resolve_entry());
 
     try std.testing.expectEqual(@as(usize, 2), parsed.functions()[0].ops[1].outputs.len);
     const literal = parsed.functions()[0].ops[0].params.literal.f32;
@@ -785,6 +780,25 @@ test "binary PR round trip is byte stable" {
     try std.testing.expectEqualSlices(u8, first_bytes, second_bytes);
 }
 
+test "binary PR preserves inferred entry selection" {
+    var source = pr.Program.init(std.testing.allocator);
+    defer source.deinit();
+    var builder = try pr.FunctionBuilder.init(&source, "only");
+    defer builder.deinit();
+    _ = try source.add_function(try builder.finish(&.{}));
+
+    var encoded: Writer.Allocating = .init(std.testing.allocator);
+    defer encoded.deinit();
+    try emit(&source, &encoded.writer);
+    const bytes = try encoded.toOwnedSlice();
+    defer std.testing.allocator.free(bytes);
+
+    var parsed = try parse(std.testing.allocator, bytes);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(?pr.FunctionId, null), parsed.entry);
+    try std.testing.expectEqual(@as(pr.FunctionId, @enumFromInt(0)), try parsed.resolve_entry());
+}
+
 test "binary PR translates monotonic function identities to wire ordinals" {
     var source = pr.Program.init(std.testing.allocator);
     defer source.deinit();
@@ -810,8 +824,8 @@ test "binary PR translates monotonic function identities to wire ordinals" {
     var caller_builder = try pr.FunctionBuilder.init(&source, "caller");
     defer caller_builder.deinit();
     const caller_input = try caller_builder.param_tensor(.f32, &.{});
-    const outputs = try caller_builder.call(callee_id, &.{caller_input});
-    _ = try source.add_function(try caller_builder.finish(outputs));
+    const call_op = try caller_builder.call(callee_id, &.{caller_input});
+    _ = try source.add_function(try caller_builder.finish(call_op.outputs));
 
     var encoded: Writer.Allocating = .init(std.testing.allocator);
     defer encoded.deinit();
@@ -819,8 +833,11 @@ test "binary PR translates monotonic function identities to wire ordinals" {
 
     var parsed = try parse(std.testing.allocator, encoded.written());
     defer parsed.deinit();
-    const parsed_callee_id = parsed.get_function_id("callee").?;
-    const parsed_caller = parsed.get_function("caller").?;
+    const function_ids = parsed.function_ids();
+    try std.testing.expectEqual(@as(usize, 3), function_ids.len);
+    const parsed_callee_id = function_ids[1];
+    const parsed_caller_id = function_ids[2];
+    const parsed_caller = parsed.get_function_by_id(parsed_caller_id).?;
     try std.testing.expectEqual(parsed_callee_id, parsed_caller.ops[0].params.call.callee);
 }
 

@@ -2,7 +2,7 @@
 const std = @import("std");
 const pr = @import("../pr.zig");
 
-/// Context passed to AD forward/backward functions.
+/// Context passed to JVP and VJP rules.
 ///
 /// Used for both VJP (reverse-mode) and JVP (forward-mode) transforms.
 /// For VJP: `tangent_map` is null, `cot_map` holds cotangent accumulation.
@@ -73,9 +73,4 @@ pub const AdError = pr.BuildError || error{
     OfIndexOutOfRange,
     /// `VjpOpts.of` provides no output cotangent seeds.
     EmptyOutputSelection,
-    /// A harvested input has no cotangent, or a harvested output has no tangent.
-    ///
-    /// This usually means a primal-chain op lacks its mode-specific propagation
-    ///  handler, or the harvested variable is orphaned.
-    MissingDual,
 };

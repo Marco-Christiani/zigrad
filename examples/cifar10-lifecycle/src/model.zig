@@ -183,15 +183,15 @@ test "trace inference and differentiated training" {
         forward,
         testing.allocator,
         .{ params_spec, inference_images_spec },
-        "main",
+        .{},
     );
     defer inference.deinit();
 
-    var training = try zg.trace_callable(
+    var training = try zg.trace(
         train_step,
         testing.allocator,
         .{ params_spec, training_batch_spec },
-        .{ .entry_name = "train_step", .donate = &.{0} },
+        .{ .name = "train_step" },
     );
     defer training.deinit();
 }

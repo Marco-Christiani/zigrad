@@ -19,7 +19,7 @@ pub const Terminal = union(enum) {
 /// Operations and lowering policy for the default IREE pipeline.
 pub const Options = struct {
     /// Validated PR to StableHLO segment.
-    stablehlo: stablehlo_pipeline.Options,
+    stablehlo: stablehlo_pipeline.Options = .{},
 };
 
 /// Create a default PR to IREE pipeline for the selected terminal operation.

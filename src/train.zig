@@ -19,16 +19,17 @@ const TensorTree = @import("utils.zig").Tree(Tensor);
 /// ## Typical usage
 ///
 /// ```zig
-/// var program = try zg.trace(train_step, allocator, specs, "train_step");
-/// defer program.deinit();
-/// var loaded_program = try compile_program(&program, "train_step");
+/// var traced = try zg.trace(train_step, allocator, specs, .{ .name = "train_step" });
+/// defer traced.deinit();
+/// var loaded_program = try pipeline.run(zg.Executor.LoadedProgram, &traced.program, &ctx);
 /// defer loaded_program.deinit();
+/// const entry = try traced.program.resolve_entry();
 /// var state = try TrainState.init(
 ///     allocator,
 ///     loaded_program,
 ///     initial_tensors,
-///     program.get_function("train_step").?.returns.len,
-///     .{ .non_donatable_input_indices = comptime donate_argnums(@TypeOf(specs), &.{0}) },
+///     traced.program.get_function_by_id(entry).?.returns.len,
+///     .{ .donated_input_indices = comptime donated_input_indices(@TypeOf(specs), &.{0}) },
 /// );
 /// defer state.deinit(.all);
 /// for (0..num_steps) |_| {
@@ -64,19 +65,21 @@ pub const TrainState = struct {
     /// `initial_tensors` must be in the same flattened order as the spec tree
     ///  passed to `trace`. All tensors must be device-backed.
     ///
-    /// Donation is specified via `non_donatable_input_indices` in opts. Use the
-    ///  `donate_argnums` helper to compute these from the spec tuple type and
-    ///  donated argument positions. Donatable inputs must precede non-donatable
-    ///  inputs in the flattened spec order (this is the natural layout when
-    ///  params are the first argument and batch data follows).
+    /// Donation is specified via `donated_input_indices` in opts. Use the
+    ///  `donated_input_indices` helper to flatten donated argument positions.
+    /// Donatable inputs must precede non-donatable inputs in the flattened spec
+    ///  order. This is the natural layout when params are the first argument and
+    ///  batch data follows.
     ///
     /// `TrainState` releases donatable buffers during swaps and `deinit`.
     ///  The caller keeps borrowed non-donatable buffers and `loaded_program`
     ///  alive.
     pub const InitOpts = struct {
-        /// Flat indices of non-donatable inputs. Must be sorted ascending.
-        /// Use `donate_argnums` to compute from spec types and argument positions.
-        non_donatable_input_indices: []const i64 = &.{},
+        /// Flat input positions available for buffer reuse.
+        ///
+        /// Indices must form a leading sequence starting at zero. Use
+        ///  `donated_input_indices` to flatten argument positions from spec types.
+        donated_input_indices: []const usize = &.{},
         /// DType of the loss output (output[0]). Defaults to f32.
         /// Override for mixed-precision training (e.g. bf16 loss with
         ///  f32 upcast).
@@ -91,17 +94,13 @@ pub const TrainState = struct {
         opts: InitOpts,
     ) (Executor.Error || error{ UnsupportedAval, InvalidDonation, InvalidOutputArity })!TrainState {
         const executor = loaded_program.executor;
-        if (opts.non_donatable_input_indices.len > initial_tensors.len) {
+        if (opts.donated_input_indices.len > initial_tensors.len) {
             return error.InvalidDonation;
         }
-        const donatable_count = initial_tensors.len - opts.non_donatable_input_indices.len;
+        const donatable_count = opts.donated_input_indices.len;
         if (output_arity < donatable_count + 1) return error.InvalidOutputArity;
-        for (opts.non_donatable_input_indices, 0..) |input_index, offset| {
-            if (input_index < 0 or
-                @as(usize, @intCast(input_index)) != donatable_count + offset)
-            {
-                return error.InvalidDonation;
-            }
+        for (opts.donated_input_indices, 0..) |input_index, expected| {
+            if (input_index != expected) return error.InvalidDonation;
         }
 
         const input_buffers = try allocator.alloc(Executor.Buffer, initial_tensors.len);
@@ -117,11 +116,9 @@ pub const TrainState = struct {
 
         const output_buffers = try allocator.alloc(Executor.Buffer, output_arity);
         errdefer allocator.free(output_buffers);
-        const donated_input_indices = try allocator.alloc(usize, donatable_count);
-        errdefer allocator.free(donated_input_indices);
-        for (donated_input_indices, 0..) |*input_index, index| {
-            input_index.* = index;
-        }
+        const donated_indices = try allocator.alloc(usize, donatable_count);
+        errdefer allocator.free(donated_indices);
+        @memcpy(donated_indices, opts.donated_input_indices);
 
         return .{
             .input_buffers = input_buffers,
@@ -129,7 +126,7 @@ pub const TrainState = struct {
             .loaded_program = loaded_program,
             .executor = executor,
             .donatable_count = donatable_count,
-            .donated_input_indices = donated_input_indices,
+            .donated_input_indices = donated_indices,
             .loss_dtype = opts.loss_dtype,
             .allocator = allocator,
         };
@@ -241,47 +238,50 @@ pub const TrainState = struct {
     }
 };
 
-/// Compute non-donatable input indices from a spec tuple type and donated
-///  argument positions.
+/// Flatten donated argument positions into input leaf indices.
 ///
 /// `SpecsTuple` is the type of the spec tuple passed to `zg.trace` (e.g.
-///  `@TypeOf(.{ params_spec, batch_spec })`). `donated` lists the argument
-///  positions that are donatable (e.g. `&.{0}` means "first arg is donated").
+///  `@TypeOf(.{ params_spec, batch_spec })`). `donated_argnums` lists the
+///  argument positions that are donatable (e.g. `&.{0}` means "first arg is
+///  donated").
 ///
-/// Returns a comptime slice of i64 indices suitable for passing to
-///  `TrainState.init` via `opts.non_donatable_input_indices`.
+/// Returns indices suitable for `Executor.InvokeOptions` and
+///  `TrainState.InitOpts`.
 ///
 /// ```zig
 /// const Specs = @TypeOf(.{ params_spec, batch_spec });
 /// var state = try TrainState.init(allocator, loaded_program, tensors, output_arity, .{
-///     .non_donatable_input_indices = comptime donate_argnums(Specs, &.{0}),
+///     .donated_input_indices = comptime donated_input_indices(Specs, &.{0}),
 /// });
 /// ```
-pub fn donate_argnums(comptime SpecsTuple: type, comptime donated: []const usize) []const i64 {
+pub fn donated_input_indices(
+    comptime SpecsTuple: type,
+    comptime donated_argnums: []const usize,
+) []const usize {
     comptime {
         const info = @typeInfo(SpecsTuple);
         if (info != .@"struct" or !info.@"struct".is_tuple)
-            @compileError("donate_argnums: SpecsTuple must be a tuple type");
+            @compileError("donated_input_indices: SpecsTuple must be a tuple type");
 
         const fields = info.@"struct".fields;
 
-        // Count non-donated leaves.
+        // Validate argument positions and count their flattened leaves.
         var count: usize = 0;
-        for (fields, 0..) |field, arg_idx| {
-            if (!is_donated(donated, arg_idx)) {
-                count += TensorTree.leaf_count(field.type);
-            }
+        for (donated_argnums, 0..) |arg_idx, position| {
+            if (arg_idx >= fields.len) @compileError("donated argument position is out of bounds");
+            if (is_donated(donated_argnums[0..position], arg_idx))
+                @compileError("donated argument positions must be unique");
+            count += TensorTree.leaf_count(fields[arg_idx].type);
         }
 
-        // Collect non-donated flat indices.
-        var result: [count]i64 = undefined;
+        var result: [count]usize = undefined;
         var out_idx: usize = 0;
         var flat_offset: usize = 0;
         for (fields, 0..) |field, arg_idx| {
             const n = TensorTree.leaf_count(field.type);
-            if (!is_donated(donated, arg_idx)) {
+            if (is_donated(donated_argnums, arg_idx)) {
                 for (0..n) |i| {
-                    result[out_idx] = @intCast(flat_offset + i);
+                    result[out_idx] = flat_offset + i;
                     out_idx += 1;
                 }
             }
@@ -298,4 +298,11 @@ fn is_donated(comptime donated: []const usize, comptime arg_idx: usize) bool {
         if (d == arg_idx) return true;
     }
     return false;
+}
+
+test donated_input_indices {
+    const Params = struct { weight: Tensor, bias: Tensor };
+    const Specs = std.meta.Tuple(&.{ Params, Tensor, [2]Tensor });
+    const donated = comptime donated_input_indices(Specs, &.{ 0, 2 });
+    try std.testing.expectEqualSlices(usize, &.{ 0, 1, 3, 4 }, donated);
 }

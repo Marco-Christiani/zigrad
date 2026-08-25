@@ -573,10 +573,10 @@ test "kernelize pass preserves observable side effects" {
     defer builder.deinit();
     const input = try builder.param_tensor(.f32, &.{2});
     try builder.push_region("effectful", &.{kernel.provider_annotation("mock")});
-    const outputs = try builder.custom_call(.{
+    const outputs = (try builder.custom_call(.{
         .target_name = "test.effectful",
         .has_side_effect = true,
-    }, &.{input}, &.{input.aval});
+    }, &.{input}, &.{input.aval})).outputs;
     try builder.pop_region();
     _ = try program.add_function(try builder.finish(outputs));
     try outline_test_program(&program);

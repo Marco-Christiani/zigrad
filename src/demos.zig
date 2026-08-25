@@ -5,11 +5,8 @@ const Tensor = zg.Tensor;
 const log = std.log.scoped(.@"zg/demos");
 
 /// Demo program: out = (mm(A, B) + C) * C where A: 2x3, B: 3x2, C: 2x2.
-pub fn build_demo_program(allocator: std.mem.Allocator) !zg.pr.Program {
-    var program = zg.pr.Program.init(allocator);
-    errdefer program.deinit();
-
-    var b = try zg.pr.FunctionBuilder.init(&program, "main");
+pub fn build_demo_program(program: *zg.pr.Program) !zg.pr.FunctionId {
+    var b = try zg.pr.FunctionBuilder.init(program, "main");
     defer b.deinit();
 
     const a_id = try b.param_tensor(.f32, &.{ 2, 3 });
@@ -21,9 +18,7 @@ pub fn build_demo_program(allocator: std.mem.Allocator) !zg.pr.Program {
     const out_id = try b.multiply(add_id, c_id);
 
     const func = try b.finish(&.{out_id});
-    _ = try program.add_function(func);
-
-    return program;
+    return try program.add_function(func);
 }
 
 pub fn write_bytes_to_path(io: std.Io, path: []const u8, bytes: []const u8) !void {
@@ -118,19 +113,16 @@ pub fn run_custom_call_negative(
     defer b.deinit();
 
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
-    const outputs = try b.custom_call(.{
+    const outputs = (try b.custom_call(.{
         .target_name = "zigrad.test.missing_handler",
         .has_side_effect = false,
-    }, &.{x}, &.{x.aval});
+    }, &.{x}, &.{x.aval})).outputs;
     const y = outputs[0];
     const func = try b.finish(&.{y});
-    _ = try program.add_function(func);
+    const function = try program.add_function(func);
+    try program.set_entry(function);
 
-    var exe = pipeline.run(
-        zg.Executor.LoadedProgram,
-        &program,
-        ctx,
-    ) catch |err| {
+    var exe = pipeline.run(zg.Executor.LoadedProgram, &program, ctx) catch |err| {
         log.info("OK: custom_call compile failed as expected: {s}", .{@errorName(err)});
         return;
     };
@@ -146,18 +138,14 @@ pub fn run_vjp_demo(
 ) !void {
     const allocator = ctx.allocator;
 
-    var program = try build_demo_program(allocator);
+    var program = zg.pr.Program.init(allocator);
     defer program.deinit();
+    const forward = try build_demo_program(&program);
 
-    const fwd = program.get_function("main") orelse unreachable;
-    const vjp = try zg.pr.ad.vjp(allocator, &program, fwd, "main_vjp", .{});
-    _ = try program.add_function(vjp);
+    const derived = try zg.pr.ad.vjp(allocator, &program, forward, "main_vjp", .{});
+    try program.set_entry(derived);
 
-    var exe = try pipeline.run(
-        zg.Executor.LoadedProgram,
-        &program,
-        ctx,
-    );
+    var exe = try pipeline.run(zg.Executor.LoadedProgram, &program, ctx);
     defer exe.deinit();
     const executor = exe.executor;
 
@@ -335,17 +323,13 @@ pub fn run_train_demo(
         .y = Tensor.abstract(.f32, &.{ bs, out_dim }),
     };
     const inputs_spec = .{ params_spec, batch_spec };
-    const donate = comptime zg.train.donate_argnums(@TypeOf(inputs_spec), &.{0});
+    const donated = comptime zg.train.donated_input_indices(@TypeOf(inputs_spec), &.{0});
 
     const train = zg.train;
-    var program = try zg.trace(Fns.train_step, allocator, inputs_spec, "train_step");
-    defer program.deinit();
+    var traced = try zg.trace(Fns.train_step, allocator, inputs_spec, .{ .name = "train_step" });
+    defer traced.deinit();
 
-    var exe = try pipeline.run(
-        zg.Executor.LoadedProgram,
-        &program,
-        ctx,
-    );
+    var exe = try pipeline.run(zg.Executor.LoadedProgram, &traced.program, ctx);
     defer exe.deinit();
     const executor = exe.executor;
 
@@ -412,13 +396,13 @@ pub fn run_train_demo(
     // TrainState releases the device tensors.
     defer dev_tree.deinit();
 
-    const entry_function = program.get_function("train_step") orelse return error.NoEntry;
+    const entry_function = traced.program.get_function_by_id(try traced.program.resolve_entry()) orelse return error.NoEntry;
     var state = try train.TrainState.init(
         allocator,
         exe,
         dev_tree.leaves,
         entry_function.returns.len,
-        .{ .non_donatable_input_indices = donate },
+        .{ .donated_input_indices = donated },
     );
     defer state.deinit(.all);
 
@@ -457,8 +441,8 @@ pub fn run_train_demo(
 ///  explicit disjoint requests. Tuning populates the kernel store before
 ///  runtime preparation, PR kernelization, and PJRT execution.
 pub const KernelProviderDemoOutputs = struct {
-    /// PR function compiled and executed by the scenario.
-    entry_name: []const u8,
+    /// Label attached to output produced for the selected function.
+    entry_label: []const u8,
 
     /// Optional destination and format for PR output.
     pr: ?zg.pr.dump.Config = null,
@@ -564,19 +548,21 @@ pub fn run_kernel_provider_demo(
     for (provider_kinds, 0..) |kind, i| pnames_buf[i] = @tagName(kind);
     const provider_names = pnames_buf[0..provider_kinds.len];
 
-    var program = try build_kernelized_demo_program(
-        allocator,
+    var program = zg.pr.Program.init(allocator);
+    defer program.deinit();
+    const entry = try build_kernelized_demo_program(
+        &program,
         provider_names,
         provider_names.len > 1,
     );
-    defer program.deinit();
+    try program.set_entry(entry);
 
     var pipeline = zg.Pipeline.init(allocator);
     defer pipeline.deinit();
     try pipeline.add(zg.pr.Validate{});
     if (outputs.pr) |selected| {
         var config = selected;
-        config.entry_name = config.entry_name orelse outputs.entry_name;
+        config.entry_label = config.entry_label orelse outputs.entry_label;
         try pipeline.add(zg.pr.dump.Dump{ .config = config });
     }
     try pipeline.add(zg.pr.transform.kernelize.DiscoverCandidates{ .providers = providers });
@@ -615,13 +601,12 @@ pub fn run_kernel_provider_demo(
     try pipeline.add(zg.pr.transform.outline.Pass{});
     try pipeline.add(zg.mlir.stablehlo.Lower{
         .config = .{
-            .entry_name = outputs.entry_name,
             .encoding = if (outputs.mlir == null) .binary else .text,
         },
     });
     if (outputs.mlir) |selected| {
         var config = selected;
-        config.entry_name = config.entry_name orelse outputs.entry_name;
+        config.entry_label = config.entry_label orelse outputs.entry_label;
         try pipeline.add(zg.stablehlo.Dump{ .config = config });
     }
 
@@ -633,7 +618,7 @@ pub fn run_kernel_provider_demo(
     try pipeline.add(&backend.interface);
     if (outputs.optimized_hlo) |selected| {
         var config = selected;
-        config.entry_name = config.entry_name orelse outputs.entry_name;
+        config.entry_label = config.entry_label orelse outputs.entry_label;
         try pipeline.add(zg.pjrt.DumpOptimizedHlo{
             .execution = &execution,
             .config = config,
@@ -758,11 +743,13 @@ pub fn print_pr(
     allocator: std.mem.Allocator,
     environ: *const std.process.Environ.Map,
 ) !void {
-    var program = try build_demo_program(allocator);
+    var program = zg.pr.Program.init(allocator);
     defer program.deinit();
+    const forward = try build_demo_program(&program);
 
-    const fwd = program.get_function("main") orelse unreachable;
-    const vjp_func = try zg.pr.ad.vjp(allocator, &program, fwd, "main_vjp", .{});
+    const forward_func = program.get_function_by_id(forward) orelse unreachable;
+    const derived = try zg.pr.ad.vjp(allocator, &program, forward, "main_vjp", .{});
+    const vjp_func = program.get_function_by_id(derived) orelse unreachable;
 
     var stdout_buffer: [8192]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
@@ -771,7 +758,7 @@ pub fn print_pr(
 
     const tc = truecolor_from_env(environ);
     try stdout.writeAll("=== Forward ===\n");
-    try zg.pr.zxpr.emit(fwd, stdout, zg.pr.zxpr.style.config(.auto_stdout, .{ .truecolor_auto = tc }));
+    try zg.pr.zxpr.emit(forward_func, stdout, zg.pr.zxpr.style.config(.auto_stdout, .{ .truecolor_auto = tc }));
     try stdout.writeAll("\n=== VJP ===\n");
     try zg.pr.zxpr.emit(vjp_func, stdout, zg.pr.zxpr.style.config(.auto_stdout, .{ .truecolor_auto = tc }));
 }
@@ -858,9 +845,8 @@ pub fn print_tvm_kernelize_pr(
     const out = try mul.add(d);
     const out_var = try out.get_var();
     const func_result = try builder.finish(&.{out_var});
-    _ = try program.add_function(func_result);
-
-    const func = program.get_function("main") orelse unreachable;
+    const identity = try program.add_function(func_result);
+    const func = program.get_function_by_id(identity) orelse unreachable;
 
     var stdout_buffer: [8192]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
@@ -905,14 +891,11 @@ fn fill_pattern(slice: []f32, scale: f32, offset: f32) void {
 ///  by `c`. Multi-provider runs use explicit disjoint requests because their
 ///  discovered region boundaries may overlap.
 fn build_kernelized_demo_program(
-    allocator: std.mem.Allocator,
+    program: *zg.pr.Program,
     provider_names: []const []const u8,
     explicit_requests: bool,
-) !zg.pr.Program {
-    var program = zg.pr.Program.init(allocator);
-    errdefer program.deinit();
-
-    var b = try zg.pr.FunctionBuilder.init(&program, "main");
+) !zg.pr.FunctionId {
+    var b = try zg.pr.FunctionBuilder.init(program, "main");
     defer b.deinit();
 
     const a_id = try b.param_tensor(.f32, &.{ 2, 3 });
@@ -937,8 +920,7 @@ fn build_kernelized_demo_program(
     const out_id = try b.multiply(add_id, c_id);
 
     const func = try b.finish(&.{out_id});
-    _ = try program.add_function(func);
-    return program;
+    return try program.add_function(func);
 }
 
 fn fill_inputs(x: []f32) void {
@@ -1077,9 +1059,8 @@ pub fn print_tvm_attention_pr(
 
     const out_var = try out.get_var();
     const func_result = try builder.finish(&.{out_var});
-    _ = try program.add_function(func_result);
-
-    const func = program.get_function("attention") orelse unreachable;
+    const identity = try program.add_function(func_result);
+    const func = program.get_function_by_id(identity) orelse unreachable;
 
     var stdout_buffer: [16384]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);

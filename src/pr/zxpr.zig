@@ -31,7 +31,7 @@ pub const Config = struct {
     /// Optional label identifying which PR function was selected as entry.
     /// Printed as "entry: <name>" header in ZXPR output for user reference.
     /// Does not affect actual function names in the dumped content.
-    entry_name: ?[]const u8 = null,
+    entry_label: ?[]const u8 = null,
 };
 
 pub fn emit_program(program: *const pr.Program, writer: *Writer, cfg: Config) !void {
@@ -39,7 +39,7 @@ pub fn emit_program(program: *const pr.Program, writer: *Writer, cfg: Config) !v
         .json => try json.emit_program(program, writer),
         .binary => try serialize.emit(program, writer),
         .zxpr => |zx| {
-            if (cfg.entry_name) |name| {
+            if (cfg.entry_label) |name| {
                 try writer.print("entry: {s}\n", .{name});
             }
 
@@ -135,7 +135,9 @@ test "zxpr format" {
     try std.testing.expect(std.mem.indexOf(u8, result, "%0: 2x3<f32>") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "let\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "mm[M=2, K=3, N=2") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "; vjp") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "!vjp") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "!jvp") == null);
+
     try std.testing.expect(std.mem.indexOf(u8, result, "in %2") != null);
 }
 
@@ -228,8 +230,8 @@ test "program zxpr exposes monotonic function identities" {
     var caller_builder = try pr.FunctionBuilder.init(&program, "caller");
     defer caller_builder.deinit();
     const caller_input = try caller_builder.param_tensor(.f32, &.{});
-    const outputs = try caller_builder.call(callee_id, &.{caller_input});
-    _ = try program.add_function(try caller_builder.finish(outputs));
+    const call_op = try caller_builder.call(callee_id, &.{caller_input});
+    _ = try program.add_function(try caller_builder.finish(call_op.outputs));
 
     var writer: Writer.Allocating = .init(std.testing.allocator);
     defer writer.deinit();

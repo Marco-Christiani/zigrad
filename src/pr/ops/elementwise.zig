@@ -44,15 +44,6 @@ pub const add = struct {
         return try infer_binary_elementwise(error.AddTypeMismatch, inputs);
     }
 
-    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 2) return error.UnsupportedEqn;
-
-        const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
-        const out = try ctx.builder.add(lhs, rhs);
-        ctx.set_primal(op.result(0), out);
-    }
-
     pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
@@ -84,15 +75,6 @@ pub const subtract = struct {
 
     pub fn infer_output(_: std.mem.Allocator, inputs: []const *pr.Var, _: void) pr.BuildError!Aval {
         return try infer_binary_elementwise(error.SubtractTypeMismatch, inputs);
-    }
-
-    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 2) return error.UnsupportedEqn;
-
-        const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
-        const out = try ctx.builder.subtract(lhs, rhs);
-        ctx.set_primal(op.result(0), out);
     }
 
     pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
@@ -129,15 +111,6 @@ pub const multiply = struct {
 
     pub fn infer_output(_: std.mem.Allocator, inputs: []const *pr.Var, _: void) pr.BuildError!Aval {
         return try infer_binary_elementwise(error.MultiplyTypeMismatch, inputs);
-    }
-
-    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 2) return error.UnsupportedEqn;
-
-        const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
-        const out = try ctx.builder.multiply(lhs, rhs);
-        ctx.set_primal(op.result(0), out);
     }
 
     pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
@@ -182,15 +155,6 @@ pub const divide = struct {
 
     pub fn infer_output(_: std.mem.Allocator, inputs: []const *pr.Var, _: void) pr.BuildError!Aval {
         return try infer_binary_elementwise(error.DivideTypeMismatch, inputs);
-    }
-
-    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 2) return error.UnsupportedEqn;
-
-        const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
-        const out = try ctx.builder.divide(lhs, rhs);
-        ctx.set_primal(op.result(0), out);
     }
 
     /// VJP: \(\mathrm{d}_{\mathrm{lhs}}(\mathrm{lhs}/\mathrm{rhs}) =
@@ -250,15 +214,6 @@ pub const maximum = struct {
         return try infer_binary_elementwise(error.MaximumTypeMismatch, inputs);
     }
 
-    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
-        if (op.inputs.len != 2) return error.UnsupportedEqn;
-
-        const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
-        const out = try ctx.builder.maximum(lhs, rhs);
-        ctx.set_primal(op.result(0), out);
-    }
-
     /// VJP: gradient routes to whichever operand was selected.
     ///  d_lhs = select(lhs >= rhs, cot, 0), d_rhs = select(lhs >= rhs, 0, cot).
     pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
@@ -277,6 +232,24 @@ pub const maximum = struct {
 
         try ctx.add_cot(op.operand(0), try ctx.builder.select(cmp, out_cot, zero));
         try ctx.add_cot(op.operand(1), try ctx.builder.select(cmp, zero, out_cot));
+    }
+
+    /// JVP: route the tangent through the selected operand, with ties using `lhs`.
+    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 2) return error.UnsupportedEqn;
+
+        const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+        const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
+        const lhs_tangent = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
+        const rhs_tangent = ctx.get_tangent(op.operand(1)) orelse return error.UnsupportedEqn;
+        const select_lhs = try ctx.builder.compare(lhs, rhs, .{
+            .direction = .GE,
+            .compare_type = .FLOAT,
+        });
+        ctx.set_tangent(
+            op.result(0),
+            try ctx.builder.select(select_lhs, lhs_tangent, rhs_tangent),
+        );
     }
 
     pub const format = format_binary_elementwise;

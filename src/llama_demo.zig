@@ -268,26 +268,24 @@ pub fn run_llama_ft_demo(
     //  operates on the shared PR recipe.
     const use_mirage_loss = cfg.kernel_provider != null;
 
-    var program = if (train_mode)
+    var program = zg.pr.Program.init(allocator);
+    defer program.deinit();
+    const function = if (train_mode)
         (if (use_mirage_loss)
-            try zg.trace(train_step_fn_mirage, allocator, inputs_spec, "llama_ft_step")
+            try zg.trace_into(train_step_fn_mirage, allocator, &program, inputs_spec, "llama_ft_step")
         else
-            try zg.trace(train_step_fn, allocator, inputs_spec, "llama_ft_step"))
+            try zg.trace_into(train_step_fn, allocator, &program, inputs_spec, "llama_ft_step"))
     else
         (if (use_mirage_loss)
-            try zg.trace(loss_fn_mirage, allocator, inputs_spec, "llama_ft_step")
+            try zg.trace_into(loss_fn_mirage, allocator, &program, inputs_spec, "llama_ft_step")
         else
-            try zg.trace(loss_fn, allocator, inputs_spec, "llama_ft_step"));
-    defer program.deinit();
-    var exe = try pipeline.run(
-        zg.Executor.LoadedProgram,
-        &program,
-        ctx,
-    );
+            try zg.trace_into(loss_fn, allocator, &program, inputs_spec, "llama_ft_step"));
+    try program.set_entry(function);
+    var exe = try pipeline.run(zg.Executor.LoadedProgram, &program, ctx);
     defer exe.deinit();
     const executor = exe.executor;
 
-    const donate = comptime zg.train.donate_argnums(@TypeOf(inputs_spec), &.{0});
+    const donated = comptime zg.train.donated_input_indices(@TypeOf(inputs_spec), &.{0});
 
     // Fill batch leaves with synthetic inputs.
     const token_seed = [_]usize{ 128000, 128009, 128001, 128008 };
@@ -336,13 +334,13 @@ pub fn run_llama_ft_demo(
         defer dev_tree.deinit();
 
         // Set up state as a convenience for training
-        const entry_function = program.get_function("llama_ft_step") orelse return error.NoEntry;
+        const entry_function = program.get_function_by_id(function) orelse return error.NoEntry;
         var state = try train.TrainState.init(
             allocator,
             exe,
             dev_tree.leaves,
             entry_function.returns.len,
-            .{ .non_donatable_input_indices = donate, .loss_dtype = loss_dtype },
+            .{ .donated_input_indices = donated, .loss_dtype = loss_dtype },
         );
         defer state.deinit(.all);
 

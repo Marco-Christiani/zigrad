@@ -10,18 +10,18 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(args);
     if (args.len != 2) return error.ExpectedOutputPath;
 
-    var program = try zg.trace(
+    var traced = try zg.trace(
         model.forward,
         allocator,
         .{ model.params_spec, model.inference_images_spec },
-        "main",
+        .{},
     );
-    defer program.deinit();
+    defer traced.deinit();
 
     var file = try std.Io.Dir.cwd().createFile(init.io, args[1], .{ .truncate = true });
     defer file.close(init.io);
     var buffer: [8192]u8 = undefined;
     var writer = file.writer(init.io, &buffer);
-    try zg.pr.serialize.emit(&program, &writer.interface);
+    try zg.pr.serialize.emit(&traced.program, &writer.interface);
     try writer.interface.flush();
 }

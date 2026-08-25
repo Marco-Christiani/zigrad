@@ -8,7 +8,7 @@ const Backend = @import("backend.zig").Backend;
 /// Operations and lowering policy for the default PJRT pipeline.
 pub const Options = struct {
     /// Validated PR to StableHLO segment.
-    stablehlo: stablehlo_pipeline.Options,
+    stablehlo: stablehlo_pipeline.Options = .{},
 };
 
 /// Create the default validated PR to loaded PJRT program pipeline.

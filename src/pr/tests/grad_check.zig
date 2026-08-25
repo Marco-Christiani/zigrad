@@ -26,12 +26,17 @@ pub const GradCheckError = pr_eval.EvalError || ad.AdError || error{GradientMism
 pub fn check_gradients(
     allocator: std.mem.Allocator,
     program: *pr.Program,
-    func: pr.Function,
+    source: pr.FunctionId,
     inputs: []const HostTensor,
     opts: GradCheckOpts,
 ) GradCheckError!void {
+    const func = program.get_function_by_id(source) orelse
+        return error.CallUnresolvedCallee;
+
     // 1. Generate VJP function
-    const vjp_func = try ad.vjp(allocator, program, func, "grad_check_vjp", .{});
+    const vjp_id = try ad.vjp(allocator, program, source, "grad_check_vjp", .{});
+    const vjp_func = program.get_function_by_id(vjp_id) orelse
+        return error.CallUnresolvedCallee;
 
     // 2. Compute analytic gradients
     //    VJP params: [N primals, M cotangents], returns: [N grads]
@@ -184,10 +189,8 @@ pub fn make_test_inputs(
 // Helper to build simple functions for testing
 // ============================================================================
 
-fn build_func(program: *pr.Program, b: *pr.FunctionBuilder, returns: []const *pr.Var) !pr.Function {
-    const func = try b.finish(returns);
-    _ = try program.add_function(func);
-    return func;
+fn build_func(program: *pr.Program, b: *pr.FunctionBuilder, returns: []const *pr.Var) !pr.FunctionId {
+    return try program.add_function(try b.finish(returns));
 }
 
 // ============================================================================
@@ -212,7 +215,7 @@ test "grad: gather with 1D start_index_map" {
         .start_index_map = &.{0},
         .index_vector_dim = 1,
     });
-    const func = try build_func(&program, &b, &.{out});
+    const func_id = try build_func(&program, &b, &.{out});
 
     // Make test inputs - operand gets [0.5, 2.0] values, indices get integer values
     var in_op = try HostTensor.init_with_data(std.testing.allocator, &.{5}, &.{ 1.0, 1.5, 0.8, 1.2, 0.6 });
@@ -220,7 +223,7 @@ test "grad: gather with 1D start_index_map" {
     var in_idx = try HostTensor.init_with_data(std.testing.allocator, &.{ 3, 1 }, &.{ 0, 2, 4 });
     defer in_idx.deinit();
 
-    try check_gradients(std.testing.allocator, &program, func, &.{ in_op, in_idx }, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, &.{ in_op, in_idx }, .{});
 }
 
 test "grad: dot_general batched [B,H,M,K] x [B,H,K,N]" {
@@ -237,7 +240,8 @@ test "grad: dot_general batched [B,H,M,K] x [B,H,K,N]" {
         .lhs_contracting_dims = &.{3},
         .rhs_contracting_dims = &.{2},
     });
-    const func = try build_func(&program, &b, &.{out});
+    const func_id = try build_func(&program, &b, &.{out});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -245,7 +249,7 @@ test "grad: dot_general batched [B,H,M,K] x [B,H,K,N]" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{});
 }
 
 test "grad: dot_general non-prefix batch dims" {
@@ -262,7 +266,8 @@ test "grad: dot_general non-prefix batch dims" {
         .lhs_contracting_dims = &.{3},
         .rhs_contracting_dims = &.{3},
     });
-    const func = try build_func(&program, &b, &.{out});
+    const func_id = try build_func(&program, &b, &.{out});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -270,7 +275,7 @@ test "grad: dot_general non-prefix batch dims" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{});
 }
 
 test "grad: dot_general multi-contract dims" {
@@ -287,7 +292,8 @@ test "grad: dot_general multi-contract dims" {
         .lhs_contracting_dims = &.{ 2, 3 },
         .rhs_contracting_dims = &.{ 2, 3 },
     });
-    const func = try build_func(&program, &b, &.{out});
+    const func_id = try build_func(&program, &b, &.{out});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -295,7 +301,7 @@ test "grad: dot_general multi-contract dims" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{});
 }
 
 // ============================================================================
@@ -311,7 +317,8 @@ test "grad: add" {
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const y = try b.param_tensor(.f32, &.{ 2, 3 });
     const z = try b.add(x, y);
-    const func = try build_func(&program, &b, &.{z});
+    const func_id = try build_func(&program, &b, &.{z});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -319,7 +326,7 @@ test "grad: add" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{});
 }
 
 test "grad: subtract" {
@@ -331,7 +338,8 @@ test "grad: subtract" {
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const y = try b.param_tensor(.f32, &.{ 2, 3 });
     const z = try b.subtract(x, y);
-    const func = try build_func(&program, &b, &.{z});
+    const func_id = try build_func(&program, &b, &.{z});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -339,7 +347,7 @@ test "grad: subtract" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{});
 }
 
 test "grad: multiply" {
@@ -351,7 +359,8 @@ test "grad: multiply" {
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const y = try b.param_tensor(.f32, &.{ 2, 3 });
     const z = try b.multiply(x, y);
-    const func = try build_func(&program, &b, &.{z});
+    const func_id = try build_func(&program, &b, &.{z});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -359,7 +368,7 @@ test "grad: multiply" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{});
 }
 
 test "grad: divide" {
@@ -371,7 +380,8 @@ test "grad: divide" {
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const y = try b.param_tensor(.f32, &.{ 2, 3 });
     const z = try b.divide(x, y);
-    const func = try build_func(&program, &b, &.{z});
+    const func_id = try build_func(&program, &b, &.{z});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -379,7 +389,7 @@ test "grad: divide" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{});
 }
 
 test "grad: exp" {
@@ -390,7 +400,8 @@ test "grad: exp" {
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const z = try b.exp(x);
-    const func = try build_func(&program, &b, &.{z});
+    const func_id = try build_func(&program, &b, &.{z});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -398,7 +409,7 @@ test "grad: exp" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{});
 }
 
 test "grad: log" {
@@ -409,7 +420,8 @@ test "grad: log" {
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const z = try b.log(x);
-    const func = try build_func(&program, &b, &.{z});
+    const func_id = try build_func(&program, &b, &.{z});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -417,7 +429,7 @@ test "grad: log" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{});
 }
 
 test "grad: rsqrt" {
@@ -428,7 +440,8 @@ test "grad: rsqrt" {
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const z = try b.rsqrt(x);
-    const func = try build_func(&program, &b, &.{z});
+    const func_id = try build_func(&program, &b, &.{z});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -436,7 +449,7 @@ test "grad: rsqrt" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{});
 }
 
 test "grad: logistic" {
@@ -447,7 +460,8 @@ test "grad: logistic" {
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const z = try b.logistic(x);
-    const func = try build_func(&program, &b, &.{z});
+    const func_id = try build_func(&program, &b, &.{z});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -455,7 +469,7 @@ test "grad: logistic" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{});
 }
 
 test "grad: dot" {
@@ -467,7 +481,8 @@ test "grad: dot" {
     const x = try b.param_tensor(.f32, &.{3});
     const y = try b.param_tensor(.f32, &.{3});
     const z = try b.dot(x, y);
-    const func = try build_func(&program, &b, &.{z});
+    const func_id = try build_func(&program, &b, &.{z});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -475,7 +490,7 @@ test "grad: dot" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{});
 }
 
 test "grad: mm" {
@@ -487,7 +502,8 @@ test "grad: mm" {
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const y = try b.param_tensor(.f32, &.{ 3, 2 });
     const z = try b.mm(x, y);
-    const func = try build_func(&program, &b, &.{z});
+    const func_id = try build_func(&program, &b, &.{z});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -495,7 +511,7 @@ test "grad: mm" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{});
 }
 
 test "grad: bmm" {
@@ -507,7 +523,8 @@ test "grad: bmm" {
     const x = try b.param_tensor(.f32, &.{ 2, 2, 3 });
     const y = try b.param_tensor(.f32, &.{ 2, 3, 2 });
     const z = try b.bmm(x, y);
-    const func = try build_func(&program, &b, &.{z});
+    const func_id = try build_func(&program, &b, &.{z});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -515,7 +532,7 @@ test "grad: bmm" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{});
 }
 
 test "grad: convolution NHWC HWIO" {
@@ -544,13 +561,14 @@ test "grad: convolution NHWC HWIO" {
             .output_spatial_dimensions = &.{ 1, 2 },
         },
     });
-    const func = try build_func(&program, &b, &.{y});
+    const func_id = try build_func(&program, &b, &.{y});
+    const func = program.get_function_by_id(func_id).?;
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
         for (test_inputs) |*t| t.deinit();
         std.testing.allocator.free(test_inputs);
     }
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{
         .epsilon = 2e-3,
         .tolerance = 2e-2,
     });
@@ -582,13 +600,14 @@ test "grad: strided convolution NHWC HWIO" {
             .output_spatial_dimensions = &.{ 1, 2 },
         },
     });
-    const func = try build_func(&program, &b, &.{y});
+    const func_id = try build_func(&program, &b, &.{y});
+    const func = program.get_function_by_id(func_id).?;
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
         for (test_inputs) |*t| t.deinit();
         std.testing.allocator.free(test_inputs);
     }
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{
         .epsilon = 2e-3,
         .tolerance = 2e-2,
     });
@@ -602,7 +621,8 @@ test "grad: reshape" {
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const y = try b.reshape(x, &.{ 3, 2 });
-    const func = try build_func(&program, &b, &.{y});
+    const func_id = try build_func(&program, &b, &.{y});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -610,7 +630,7 @@ test "grad: reshape" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{});
 }
 
 test "grad: transpose" {
@@ -621,7 +641,8 @@ test "grad: transpose" {
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const y = try b.transpose(x, &.{ 1, 0 });
-    const func = try build_func(&program, &b, &.{y});
+    const func_id = try build_func(&program, &b, &.{y});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -629,7 +650,7 @@ test "grad: transpose" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{});
 }
 
 test "grad: broadcast_in_dim scalar to matrix" {
@@ -640,7 +661,8 @@ test "grad: broadcast_in_dim scalar to matrix" {
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{});
     const y = try b.broadcast_in_dim(x, &.{ 2, 3 }, &.{});
-    const func = try build_func(&program, &b, &.{y});
+    const func_id = try build_func(&program, &b, &.{y});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -648,7 +670,7 @@ test "grad: broadcast_in_dim scalar to matrix" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{});
 }
 
 test "grad: broadcast_in_dim with size-1 dims" {
@@ -659,7 +681,8 @@ test "grad: broadcast_in_dim with size-1 dims" {
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{ 1, 3 });
     const y = try b.broadcast_in_dim(x, &.{ 4, 3 }, &.{ 0, 1 });
-    const func = try build_func(&program, &b, &.{y});
+    const func_id = try build_func(&program, &b, &.{y});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -667,7 +690,7 @@ test "grad: broadcast_in_dim with size-1 dims" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{});
 }
 
 test "grad: reduce sum single axis" {
@@ -678,7 +701,8 @@ test "grad: reduce sum single axis" {
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const y = try b.reduce(x, .{ .axes = &.{1}, .operation = .sum });
-    const func = try build_func(&program, &b, &.{y});
+    const func_id = try build_func(&program, &b, &.{y});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -686,7 +710,7 @@ test "grad: reduce sum single axis" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{});
 }
 
 test "grad: reduce sum all axes" {
@@ -697,7 +721,8 @@ test "grad: reduce sum all axes" {
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const y = try b.reduce(x, .{ .axes = &.{ 0, 1 }, .operation = .sum });
-    const func = try build_func(&program, &b, &.{y});
+    const func_id = try build_func(&program, &b, &.{y});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -705,7 +730,7 @@ test "grad: reduce sum all axes" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{});
 }
 
 test "grad: slice" {
@@ -720,7 +745,8 @@ test "grad: slice" {
         .limit_indices = &.{ 3, 3 },
         .strides = &.{ 1, 1 },
     });
-    const func = try build_func(&program, &b, &.{y});
+    const func_id = try build_func(&program, &b, &.{y});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -728,7 +754,7 @@ test "grad: slice" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{});
 }
 
 test "grad: concatenate" {
@@ -740,7 +766,8 @@ test "grad: concatenate" {
     const x = try b.param_tensor(.f32, &.{ 2, 2 });
     const y = try b.param_tensor(.f32, &.{ 2, 3 });
     const z = try b.concatenate(&.{ x, y }, 1);
-    const func = try build_func(&program, &b, &.{z});
+    const func_id = try build_func(&program, &b, &.{z});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -748,7 +775,7 @@ test "grad: concatenate" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{});
 }
 
 test "grad: reduce maximum" {
@@ -759,7 +786,8 @@ test "grad: reduce maximum" {
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{ 3, 4 });
     const y = try b.reduce(x, .{ .axes = &.{1}, .operation = .maximum });
-    const func = try build_func(&program, &b, &.{y});
+    const func_id = try build_func(&program, &b, &.{y});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -767,7 +795,7 @@ test "grad: reduce maximum" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{});
 }
 
 // ============================================================================
@@ -786,7 +814,8 @@ test "grad: softmax pattern" {
     const sum_ex = try b.reduce(ex, .{ .axes = &.{1}, .operation = .sum }); // [2]
     const sum_bcast = try b.broadcast_in_dim(try b.reshape(sum_ex, &.{ 2, 1 }), &.{ 2, 3 }, &.{ 0, 1 });
     const softmax = try b.divide(ex, sum_bcast);
-    const func = try build_func(&program, &b, &.{softmax});
+    const func_id = try build_func(&program, &b, &.{softmax});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -794,7 +823,7 @@ test "grad: softmax pattern" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{ .tolerance = 2e-2 });
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{ .tolerance = 2e-2 });
 }
 
 test "grad: matmul + bias + logistic chain" {
@@ -811,7 +840,8 @@ test "grad: matmul + bias + logistic chain" {
     const bias_bcast = try b.broadcast_in_dim(bias, &.{ 2, 4 }, &.{ 0, 1 });
     const with_bias = try b.add(matmul, bias_bcast);
     const activated = try b.logistic(with_bias);
-    const func = try build_func(&program, &b, &.{activated});
+    const func_id = try build_func(&program, &b, &.{activated});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -819,7 +849,7 @@ test "grad: matmul + bias + logistic chain" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{});
 }
 
 test "grad: cross-entropy loss" {
@@ -838,7 +868,8 @@ test "grad: cross-entropy loss" {
     const neg_one = try b.literal_scalar(.{ .f32 = -1.0 });
     const neg_bcast = try b.broadcast_in_dim(neg_one, &.{2}, &.{});
     const neg_sum = try b.multiply(neg_bcast, sum_per_sample);
-    const func = try build_func(&program, &b, &.{neg_sum});
+    const func_id = try build_func(&program, &b, &.{neg_sum});
+    const func = program.get_function_by_id(func_id).?;
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
     defer {
@@ -846,5 +877,5 @@ test "grad: cross-entropy loss" {
         std.testing.allocator.free(test_inputs);
     }
 
-    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+    try check_gradients(std.testing.allocator, &program, func_id, test_inputs, .{});
 }

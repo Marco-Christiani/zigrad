@@ -51,7 +51,7 @@ pub const Dump = struct {
             }
         }{
             .bytes = artifact.bytes,
-            .entry = self.config.entry_name,
+            .entry = self.config.entry_label,
         };
 
         try output.write(ctx.io, self.config.target, task);
@@ -59,8 +59,8 @@ pub const Dump = struct {
     }
 };
 
-fn write_text(bytes: []const u8, entry_name: ?[]const u8, writer: *std.Io.Writer) !void {
-    if (entry_name) |name| {
+fn write_text(bytes: []const u8, entry_label: ?[]const u8, writer: *std.Io.Writer) !void {
+    if (entry_label) |name| {
         try writer.print("entry: {s}\n", .{name});
     }
     try writer.writeAll(bytes);

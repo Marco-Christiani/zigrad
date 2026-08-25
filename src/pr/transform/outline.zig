@@ -62,6 +62,62 @@ const OpRange = struct {
     end: usize,
 };
 
+/// Dense source-to-replacement variable map used while rebuilding a function.
+const VarRemap = struct {
+    allocator: Allocator,
+    /// Replacement values indexed by source variable id. Null marks an
+    ///  unbound source variable.
+    replacements: []?*pr.Var,
+
+    /// Allocate an empty map for `var_count` source variables.
+    fn init(allocator: Allocator, var_count: u32) Allocator.Error!VarRemap {
+        const replacements = try allocator.alloc(?*pr.Var, var_count);
+        @memset(replacements, null);
+        return .{ .allocator = allocator, .replacements = replacements };
+    }
+
+    fn deinit(self: VarRemap) void {
+        self.allocator.free(self.replacements);
+    }
+
+    /// Bind an unbound source variable to its replacement.
+    fn bind(self: VarRemap, source: *const pr.Var, replacement: *pr.Var) void {
+        std.debug.assert(source.id < self.replacements.len);
+        std.debug.assert(self.replacements[source.id] == null);
+        self.replacements[source.id] = replacement;
+    }
+
+    /// Bind corresponding source and replacement variables.
+    fn bind_all(self: VarRemap, sources: []const *pr.Var, replacements: []const *pr.Var) void {
+        std.debug.assert(sources.len == replacements.len);
+        for (sources, replacements) |source, replacement| self.bind(source, replacement);
+    }
+
+    /// Resolve a bound source variable.
+    fn resolve(self: VarRemap, source: *const pr.Var) ApplyError!*pr.Var {
+        std.debug.assert(source.id < self.replacements.len);
+        return self.replacements[source.id] orelse error.MissingValueMapping;
+    }
+
+    /// Allocate resolved replacements for `sources`.
+    fn alloc_values(self: VarRemap, sources: []const *pr.Var) ApplyError![]*pr.Var {
+        const resolved = try self.allocator.alloc(*pr.Var, sources.len);
+        errdefer self.allocator.free(resolved);
+        for (sources, resolved) |source, *replacement|
+            replacement.* = try self.resolve(source);
+        return resolved;
+    }
+
+    /// Allocate resolved replacements for the inputs of `op`.
+    fn alloc_inputs(self: VarRemap, op: *const pr.Op) ApplyError![]*pr.Var {
+        const resolved = try self.allocator.alloc(*pr.Var, op.inputs.len);
+        errdefer self.allocator.free(resolved);
+        for (op.inputs, resolved) |operand, *replacement|
+            replacement.* = try self.resolve(operand.value);
+        return resolved;
+    }
+};
+
 /// Outline one region into a PR function and replace its operations with a call.
 ///
 /// `scratch` backs temporary maps only. The program arena owns the resulting
@@ -85,7 +141,7 @@ pub fn apply(
     defer if (generated_base) |name| scratch.free(name);
     const function_name = opts.function_name orelse
         try program.reserve_unique_function_name(generated_base.?);
-    if (program.get_function(function_name) != null) return error.DuplicateFunctionName;
+    if (program.get_function_id(function_name) != null) return error.DuplicateFunctionName;
     const target_range = try region_range(source, target);
 
     for (source.regions) |region| {
@@ -254,22 +310,22 @@ fn build_outlined_function(
     var builder = try pr.FunctionBuilder.init(program, function_name);
     defer builder.deinit();
 
-    const values = try scratch.alloc(?*pr.Var, source.var_count);
-    defer scratch.free(values);
-    @memset(values, null);
+    const vars = try VarRemap.init(scratch, source.var_count);
+    defer vars.deinit();
 
     for (desc.inputs) |input| {
-        const tensor = input.aval.as_tensor();
-        values[input.id] = try builder.param_tensor(tensor.dtype, tensor.shape.dims);
+        vars.bind(input, try builder.param_like(input.aval));
     }
 
     for (source.ops[target_range.start..target_range.end], target_range.start..) |op, source_index| {
-        const outputs = try clone_op(&builder, scratch, op, values);
-        op_ids[source_index] = @intCast(source_index - target_range.start);
-        for (op.outputs, outputs) |old, new| values[old.id] = new;
+        const inputs = try vars.alloc_inputs(op);
+        defer scratch.free(inputs);
+        const replayed = try builder.replay_op(op, inputs);
+        op_ids[source_index] = replayed.id;
+        vars.bind_all(op.outputs, replayed.outputs);
     }
 
-    const returns = try mapped_values(scratch, desc.outputs, values);
+    const returns = try vars.alloc_values(desc.outputs);
     defer scratch.free(returns);
     var outlined = try builder.finish(returns);
     outlined.annotations = try pr.dupe_annotations(program.allocator(), function_annotations);
@@ -288,83 +344,37 @@ fn build_caller_function(
     var builder = try pr.FunctionBuilder.init(program, source.name);
     defer builder.deinit();
 
-    const values = try scratch.alloc(?*pr.Var, source.var_count);
-    defer scratch.free(values);
-    @memset(values, null);
+    const vars = try VarRemap.init(scratch, source.var_count);
+    defer vars.deinit();
 
     for (source.params) |param| {
-        const tensor = param.aval.as_tensor();
-        values[param.id] = try builder.param_tensor(tensor.dtype, tensor.shape.dims);
+        vars.bind(param, try builder.param_like(param.aval));
     }
 
     var source_index: usize = 0;
-    var next_op_id: u32 = 0;
     while (source_index < source.ops.len) {
         if (source_index == target_range.start) {
-            const inputs = try mapped_values(scratch, desc.inputs, values);
+            const inputs = try vars.alloc_values(desc.inputs);
             defer scratch.free(inputs);
-            const out_avals = try avals(scratch, desc.outputs);
-            defer scratch.free(out_avals);
-            const outputs = try builder.emit_outputs(
-                .{ .call = .{ .callee = callee_id } },
-                inputs,
-                out_avals,
-            );
-            for (desc.outputs, outputs) |old, new| values[old.id] = new;
-            op_ids[source_index] = next_op_id;
-            next_op_id += 1;
+            const call_op = try builder.call(callee_id, inputs);
+            vars.bind_all(desc.outputs, call_op.outputs);
+            op_ids[source_index] = call_op.id;
             source_index = target_range.end;
             continue;
         }
 
         const op = source.ops[source_index];
-        const outputs = try clone_op(&builder, scratch, op, values);
-        op_ids[source_index] = next_op_id;
-        next_op_id += 1;
-        for (op.outputs, outputs) |old, new| values[old.id] = new;
+        const inputs = try vars.alloc_inputs(op);
+        defer scratch.free(inputs);
+        const replayed = try builder.replay_op(op, inputs);
+        op_ids[source_index] = replayed.id;
+        vars.bind_all(op.outputs, replayed.outputs);
         source_index += 1;
     }
 
-    const returns = try mapped_values(scratch, source.returns, values);
+    const returns = try vars.alloc_values(source.returns);
     defer scratch.free(returns);
     return try builder.finish(returns);
-}
-
-fn clone_op(
-    builder: *pr.FunctionBuilder,
-    scratch: Allocator,
-    op: *const pr.Op,
-    values: []const ?*pr.Var,
-) ApplyError![]*pr.Var {
-    const inputs = try scratch.alloc(*pr.Var, op.inputs.len);
-    defer scratch.free(inputs);
-    for (op.inputs, 0..) |operand, index| {
-        inputs[index] = values[operand.value.id] orelse return error.MissingValueMapping;
-    }
-
-    const out_avals = try scratch.alloc(pr.Aval, op.outputs.len);
-    defer scratch.free(out_avals);
-    for (op.outputs, 0..) |output, index| out_avals[index] = output.aval;
-    return try builder.emit_outputs(op.params, inputs, out_avals);
-}
-
-fn mapped_values(
-    scratch: Allocator,
-    source: []const *pr.Var,
-    values: []const ?*pr.Var,
-) ApplyError![]*pr.Var {
-    const mapped = try scratch.alloc(*pr.Var, source.len);
-    errdefer scratch.free(mapped);
-    for (source, 0..) |value, index| {
-        mapped[index] = values[value.id] orelse return error.MissingValueMapping;
-    }
-    return mapped;
-}
-
-fn avals(scratch: Allocator, values: []const *pr.Var) Allocator.Error![]pr.Aval {
-    const result = try scratch.alloc(pr.Aval, values.len);
-    for (values, 0..) |value, index| result[index] = value.aval;
-    return result;
 }
 
 fn build_outlined_regions(

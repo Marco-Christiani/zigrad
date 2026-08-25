@@ -352,12 +352,12 @@ fn dispatch_pjrt_artifact(
                     return error.MlirDisabled;
                 }
 
-                var program = try demos.build_demo_program(gpa);
+                var program = zg.pr.Program.init(gpa);
                 defer program.deinit();
+                const entry = try demos.build_demo_program(&program);
+                try program.set_entry(entry);
 
-                var pipeline = try zg.pjrt.pipeline.create(gpa, backend, .{
-                    .stablehlo = .{ .entry_name = "main" },
-                });
+                var pipeline = try zg.pjrt.pipeline.create(gpa, backend, .{});
                 defer pipeline.deinit();
                 var loaded_program = try pipeline.run(
                     zg.Executor.LoadedProgram,
@@ -419,7 +419,7 @@ fn dispatch_pjrt_demo(
                 backend,
                 env.environ,
                 .{
-                    .entry_name = "main",
+                    .entry_label = "main",
                     .pr = outputs.pr,
                     .mlir = outputs.mlir,
                     .optimized_hlo = outputs.optimized_hlo,
@@ -431,26 +431,9 @@ fn dispatch_pjrt_demo(
         else => {},
     }
 
-    var pipeline = try create_pjrt_demo_pipeline(
-        ctx.allocator,
-        backend,
-        execution,
-        outputs,
-        demo_entry_name(command),
-    );
+    var pipeline = try create_pjrt_demo_pipeline(ctx.allocator, backend, execution, outputs);
     defer pipeline.deinit();
     return try run_portable_demo(env, command, ctx, &pipeline, quiet);
-}
-
-fn demo_entry_name(command: cli.DemoCommand) []const u8 {
-    return switch (command) {
-        .basic, .custom_call_negative => "main",
-        .kernel_provider => unreachable,
-        .vjp => "main_vjp",
-        .train => "train_step",
-        .llm_train => "llm_ft_step",
-        .llama_finetune => "llama_ft_step",
-    };
 }
 
 fn run_portable_demo(
@@ -500,16 +483,15 @@ fn create_pjrt_demo_pipeline(
     backend: *zg.pjrt.Backend,
     execution: *zg.pjrt.Execution,
     outputs: OutputOptions,
-    entry_name: []const u8,
 ) !zg.Pipeline {
     var pipeline = zg.Pipeline.init(allocator);
     errdefer pipeline.deinit();
-    try add_mlir_input(&pipeline, outputs, entry_name);
+    try add_mlir_input(&pipeline, outputs);
     try pipeline.add(&backend.interface);
     if (outputs.optimized_hlo) |config| {
         try pipeline.add(zg.pjrt.DumpOptimizedHlo{
             .execution = execution,
-            .config = with_entry(config, entry_name),
+            .config = config,
         });
     }
     return pipeline;
@@ -519,11 +501,10 @@ fn create_iree_demo_pipeline(
     allocator: std.mem.Allocator,
     backend: *zg.iree.Backend,
     outputs: OutputOptions,
-    entry_name: []const u8,
 ) !zg.Pipeline {
     var pipeline = zg.Pipeline.init(allocator);
     errdefer pipeline.deinit();
-    try add_mlir_input(&pipeline, outputs, entry_name);
+    try add_mlir_input(&pipeline, outputs);
     try pipeline.add(&backend.interface);
     return pipeline;
 }
@@ -531,28 +512,20 @@ fn create_iree_demo_pipeline(
 fn add_mlir_input(
     pipeline: *zg.Pipeline,
     outputs: OutputOptions,
-    entry_name: []const u8,
 ) !void {
     try pipeline.add(zg.pr.Validate{});
     if (outputs.pr) |config| {
-        try pipeline.add(zg.pr.dump.Dump{ .config = with_entry(config, entry_name) });
+        try pipeline.add(zg.pr.dump.Dump{ .config = config });
     }
     try pipeline.add(zg.pr.transform.outline.Pass{});
     try pipeline.add(zg.mlir.stablehlo.Lower{
         .config = .{
-            .entry_name = entry_name,
             .encoding = if (outputs.mlir == null) .binary else .text,
         },
     });
     if (outputs.mlir) |config| {
-        try pipeline.add(zg.stablehlo.Dump{ .config = with_entry(config, entry_name) });
+        try pipeline.add(zg.stablehlo.Dump{ .config = config });
     }
-}
-
-fn with_entry(config: anytype, entry_name: []const u8) @TypeOf(config) {
-    var result = config;
-    result.entry_name = result.entry_name orelse entry_name;
-    return result;
 }
 
 fn llama_config(opts: cli.LlamaFtDemoOpts) !llama_demo.LlamaDemoConfig {
@@ -676,12 +649,7 @@ fn dispatch_iree_demo(
             .device = execution.interface.device,
         };
         var backend = zg.iree.Backend.init(&execution, config.compiler, "module.main");
-        var pipeline = try create_iree_demo_pipeline(
-            gpa,
-            &backend,
-            outputs,
-            demo_entry_name(command),
-        );
+        var pipeline = try create_iree_demo_pipeline(gpa, &backend, outputs);
         defer pipeline.deinit();
         return try run_portable_demo(
             env,
@@ -700,13 +668,11 @@ fn run_basic_demo(
     ctx: *zg.CompilationCtx,
     pipeline: *zg.Pipeline,
 ) !void {
-    var program = try demos.build_demo_program(ctx.allocator);
+    var program = zg.pr.Program.init(ctx.allocator);
     defer program.deinit();
-    var loaded_program = try pipeline.run(
-        zg.Executor.LoadedProgram,
-        &program,
-        ctx,
-    );
+    const function = try demos.build_demo_program(&program);
+    try program.set_entry(function);
+    var loaded_program = try pipeline.run(zg.Executor.LoadedProgram, &program, ctx);
     defer loaded_program.deinit();
     return try demos.run_demo_executable(
         ctx.allocator,

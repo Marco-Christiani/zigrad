@@ -51,7 +51,7 @@ test "emit_program includes entry header and zxpr output" {
 
     try zxpr.emit_program(&program, &writer_state.writer, .{
         .target = .stdout,
-        .entry_name = "test_main",
+        .entry_label = "test_main",
         .spec = .{ .zxpr = .{ .mode = .plain } },
     });
     const out = try writer_state.toOwnedSlice();
@@ -78,7 +78,7 @@ test "emit_program json format" {
 
     try zxpr.emit_program(&program, &writer_state.writer, .{
         .target = .stdout,
-        .entry_name = "main",
+        .entry_label = "main",
         .spec = .json,
     });
     const out = try writer_state.toOwnedSlice();
