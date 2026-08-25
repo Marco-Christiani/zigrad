@@ -190,7 +190,7 @@ pub fn make_test_inputs(
 // ============================================================================
 
 fn build_func(program: *pr.Program, b: *pr.FunctionBuilder, returns: []const *pr.Var) !pr.FunctionId {
-    return try program.add_function(try b.finish(returns));
+    return try program.add_function(try b.finish(.{ .returns = returns }));
 }
 
 // ============================================================================

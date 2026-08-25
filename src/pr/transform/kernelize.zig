@@ -464,7 +464,7 @@ test "OutlineCandidates gives outer provider requests precedence" {
     const product = try builder.multiply(sum, rhs);
     try builder.pop_region();
     try builder.pop_region();
-    _ = try program.add_function(try builder.finish(&.{product}));
+    _ = try program.add_function(try builder.finish(.{ .returns = &.{product} }));
 
     try outline_test_program(&program);
 
@@ -505,7 +505,7 @@ test "DiscoverCandidates groups providers matching the same PR range" {
     const lhs = try builder.param_tensor(.f32, &.{ 2, 3 });
     const rhs = try builder.param_tensor(.f32, &.{ 3, 2 });
     const result = try builder.mm(lhs, rhs);
-    _ = try program.add_function(try builder.finish(&.{result}));
+    _ = try program.add_function(try builder.finish(.{ .returns = &.{result} }));
 
     var first = Matcher{ .name = "first" };
     var second = Matcher{ .name = "second" };
@@ -535,7 +535,7 @@ test "kernelize pass rewrites a selected function call" {
     const y = try b.emit(.{ .exp = {} }, &.{x});
     try b.pop_region();
 
-    const func = try b.finish(&.{y});
+    const func = try b.finish(.{ .returns = &.{y} });
     _ = try program.add_function(func);
     try outline_test_program(&program);
 
@@ -578,7 +578,7 @@ test "kernelize pass preserves observable side effects" {
         .has_side_effect = true,
     }, &.{input}, &.{input.aval})).outputs;
     try builder.pop_region();
-    _ = try program.add_function(try builder.finish(outputs));
+    _ = try program.add_function(try builder.finish(.{ .returns = outputs }));
     try outline_test_program(&program);
 
     var store = kernel.KernelStore.init(testing.allocator);
@@ -611,7 +611,7 @@ test "kernelize pass does not replace a declined function call" {
     const y = try b.emit(.{ .exp = {} }, &.{x});
     try b.pop_region();
 
-    const func = try b.finish(&.{y});
+    const func = try b.finish(.{ .returns = &.{y} });
     _ = try program.add_function(func);
     try outline_test_program(&program);
 
@@ -652,7 +652,7 @@ test "kernelize pass does not replace a call without a selection" {
     const y = try b.emit(.{ .exp = {} }, &.{x});
     try b.pop_region();
 
-    const func = try b.finish(&.{y});
+    const func = try b.finish(.{ .returns = &.{y} });
     _ = try program.add_function(func);
     try outline_test_program(&program);
 
@@ -685,7 +685,7 @@ test "kernelize pass does not reuse another provider selection" {
     try builder.push_region("test_region", &.{kernel.provider_annotation("requested")});
     const output = try builder.emit(.{ .exp = {} }, &.{input});
     try builder.pop_region();
-    const function = try builder.finish(&.{output});
+    const function = try builder.finish(.{ .returns = &.{output} });
     _ = try program.add_function(function);
     try outline_test_program(&program);
 
@@ -722,7 +722,7 @@ test "kernelize pass rewrites a multi-output function call" {
     const b_out = try b.emit(.{ .log = {} }, &.{y});
     try b.pop_region();
 
-    const func = try b.finish(&.{ a, b_out });
+    const func = try b.finish(.{ .returns = &.{ a, b_out } });
     _ = try program.add_function(func);
     try outline_test_program(&program);
     const call_outputs = program.functions()[0].ops[0].outputs;
@@ -773,7 +773,7 @@ test "kernelize pass shares selections for equal functions" {
     const out_b = try b.emit(.{ .exp = {} }, &.{y});
     try b.pop_region();
 
-    const func = try b.finish(&.{ out_a, out_b });
+    const func = try b.finish(.{ .returns = &.{ out_a, out_b } });
     _ = try program.add_function(func);
     try outline_test_program(&program);
 
@@ -819,7 +819,7 @@ test "kernelize pass separates functions with different shapes" {
     const out_large = try b.emit(.{ .exp = {} }, &.{y});
     try b.pop_region();
 
-    const func = try b.finish(&.{ out_small, out_large });
+    const func = try b.finish(.{ .returns = &.{ out_small, out_large } });
     _ = try program.add_function(func);
     try outline_test_program(&program);
 

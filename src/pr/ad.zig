@@ -326,18 +326,17 @@ fn linearize_impl(
         }
     }
 
-    var linear_func = try linear_builder.finish(linear_returns[0..linear_return_count]);
-
     // Residual parameters are provisional. Their use lists identify the
     //  primal values the completed linear function actually needs.
     var used_residual_count: usize = 0;
     for (residuals.items) |candidate| {
         if (candidate.linear_param.first_use != null) used_residual_count += 1;
     }
-    const linear_params = try program.allocator().alloc(
+    const linear_params = try allocator.alloc(
         *pr.Var,
         tangent_param_count + used_residual_count,
     );
+    defer allocator.free(linear_params);
     @memcpy(linear_params[0..tangent_param_count], tangent_params[0..tangent_param_count]);
     var residual_index: usize = 0;
     for (residuals.items) |candidate| {
@@ -346,8 +345,11 @@ fn linearize_impl(
         residual_index += 1;
     }
     std.debug.assert(residual_index == used_residual_count);
-    linear_func.params = linear_params;
-    reindex_vars(&linear_func);
+
+    const linear_func = try linear_builder.finish(.{
+        .returns = linear_returns[0..linear_return_count],
+        .parameters = .{ .selected = linear_params },
+    });
 
     const primal_returns = try allocator.alloc(
         *pr.Var,
@@ -365,7 +367,7 @@ fn linearize_impl(
     }
     std.debug.assert(residual_index == used_residual_count);
 
-    const primal_func = try primal_builder.finish(primal_returns);
+    const primal_func = try primal_builder.finish(.{ .returns = primal_returns });
     const primal_id = try program.add_function(primal_func);
     const linear_id = try program.add_function(linear_func);
     return .{
@@ -387,23 +389,6 @@ fn replay_primal(ctx: PrimalContext, op: *const pr.Op) AdError!void {
     const replayed = try ctx.builder.replay_op(op, inputs);
     if (replayed.outputs.len != op.outputs.len) return error.InvalidLinearization;
     for (op.outputs, replayed.outputs) |source, output| ctx.set_primal(source, output);
-}
-
-/// Assign dense function-local SSA ids after removing provisional parameters.
-fn reindex_vars(func: *pr.Function) void {
-    var next_id: u32 = 0;
-    for (func.params) |param| {
-        param.id = next_id;
-        next_id += 1;
-    }
-    for (func.ops) |op| {
-        for (op.outputs) |output| {
-            output.id = next_id;
-            next_id += 1;
-        }
-    }
-    std.debug.assert(next_id <= func.var_count);
-    func.var_count = next_id;
 }
 
 /// Emit an augmented-primal call and validate its linearization contract.
@@ -744,7 +729,7 @@ fn transpose_impl(
         }
     }
 
-    return try b.finish(returns);
+    return try b.finish(.{ .returns = returns });
 }
 
 fn transpose_call(
@@ -971,7 +956,7 @@ pub fn vjp(
         @memcpy(outputs[0..primal_count], primal_outputs[0..primal_count]);
     }
     @memcpy(outputs[primal_count..], gradients);
-    return try program.add_function(try builder.finish(outputs));
+    return try program.add_function(try builder.finish(.{ .returns = outputs }));
 }
 
 /// Forward-mode AD applies the differential of \(f: M \to N\):
@@ -1093,7 +1078,7 @@ pub fn jvp(
         output_index += 1;
     }
     if (output_index != outputs.len) return error.InvalidLinearization;
-    return try program.add_function(try builder.finish(outputs));
+    return try program.add_function(try builder.finish(.{ .returns = outputs }));
 }
 
 /// Emit a ones-like cotangent for VJP seeding.
@@ -1111,7 +1096,7 @@ test "linearize separates residuals from tangent inputs" {
     defer builder.deinit();
     const x = try builder.param_tensor(.f32, &.{});
     const y = try builder.multiply(x, x);
-    const source = try builder.finish(&.{y});
+    const source = try builder.finish(.{ .returns = &.{y} });
     const source_id = try program.add_function(source);
 
     const result = try linearize(std.testing.allocator, &program, source_id, "square_linearized");
@@ -1172,7 +1157,7 @@ test "linearize carries structural zero through a predicate broadcast" {
     const x_row = try builder.broadcast_in_dim(x, &.{ 1, 2 }, &.{1});
     const zero_row = try builder.broadcast_in_dim(zero, &.{ 1, 2 }, &.{1});
     const selected = try builder.select(predicate_row, x_row, zero_row);
-    const source = try program.add_function(try builder.finish(&.{selected}));
+    const source = try program.add_function(try builder.finish(.{ .returns = &.{selected} }));
 
     const differentiated_id = try jvp(
         std.testing.allocator,
@@ -1217,14 +1202,14 @@ test "jvp preserves structural zero across an inactive call" {
     defer callee_builder.deinit();
     const callee_input = try callee_builder.param_tensor(.f32, &.{});
     const callee_result = try callee_builder.multiply(callee_input, callee_input);
-    const callee = try program.add_function(try callee_builder.finish(&.{callee_result}));
+    const callee = try program.add_function(try callee_builder.finish(.{ .returns = &.{callee_result} }));
 
     var caller_builder = try pr.FunctionBuilder.init(&program, "constant_result");
     defer caller_builder.deinit();
     _ = try caller_builder.param_tensor(.f32, &.{});
     const constant = try caller_builder.scalar(.f32, 3.0);
     const call_outputs = (try caller_builder.call(callee, &.{constant})).outputs;
-    const source = try program.add_function(try caller_builder.finish(call_outputs));
+    const source = try program.add_function(try caller_builder.finish(.{ .returns = call_outputs }));
 
     const linearized = try linearize(
         std.testing.allocator,
@@ -1288,7 +1273,7 @@ fn build_mixed_select_call(program: *pr.Program) !pr.FunctionId {
         callee_rhs,
     );
     const callee = try program.add_function(
-        try callee_builder.finish(&.{callee_result}),
+        try callee_builder.finish(.{ .returns = &.{callee_result} }),
     );
 
     var caller_builder = try pr.FunctionBuilder.init(program, "call_select_values");
@@ -1298,7 +1283,7 @@ fn build_mixed_select_call(program: *pr.Program) !pr.FunctionId {
     const rhs = try caller_builder.param_tensor(.f32, &.{2});
     const selected = (try caller_builder.call(callee, &.{ condition, lhs, rhs })).outputs;
     return try program.add_function(
-        try caller_builder.finish(&.{ condition, selected[0] }),
+        try caller_builder.finish(.{ .returns = &.{ condition, selected[0] } }),
     );
 }
 
@@ -1439,7 +1424,7 @@ test "linearized programs serialize" {
     defer builder.deinit();
     const x = try builder.param_tensor(.f32, &.{});
     const y = try builder.multiply(x, x);
-    const source = try builder.finish(&.{y});
+    const source = try builder.finish(.{ .returns = &.{y} });
     const source_id = try program.add_function(source);
     _ = try linearize(std.testing.allocator, &program, source_id, "square_linearized");
 
@@ -1464,14 +1449,14 @@ test "linearize rejects recursive call graphs" {
     defer placeholder_builder.deinit();
     const placeholder_param = try placeholder_builder.param_tensor(.f32, &.{});
     const function_id = try program.add_function(
-        try placeholder_builder.finish(&.{placeholder_param}),
+        try placeholder_builder.finish(.{ .returns = &.{placeholder_param} }),
     );
 
     var recursive_builder = try pr.FunctionBuilder.init(&program, "recursive");
     defer recursive_builder.deinit();
     const recursive_param = try recursive_builder.param_tensor(.f32, &.{});
     const recursive_call = try recursive_builder.call(function_id, &.{recursive_param});
-    const recursive = try recursive_builder.finish(recursive_call.outputs);
+    const recursive = try recursive_builder.finish(.{ .returns = recursive_call.outputs });
     try program.replace_function(function_id, recursive);
 
     try std.testing.expectError(
@@ -1496,7 +1481,7 @@ test "vjp produces gradients matching input shapes" {
     const add_id = try b.add(mm_id, c_id);
     const out_id = try b.multiply(add_id, c_id);
 
-    const func = try b.finish(&.{out_id});
+    const func = try b.finish(.{ .returns = &.{out_id} });
     const source_id = try program.add_function(func);
 
     const vjp_id = try vjp(std.testing.allocator, &program, source_id, "vjp", .{});
@@ -1525,7 +1510,7 @@ test "vjp selects output cotangent seeds" {
     const x = try b.param_tensor(.f32, &.{});
     const square = try b.multiply(x, x);
     const double = try b.add(x, x);
-    const func = try b.finish(&.{ square, double });
+    const func = try b.finish(.{ .returns = &.{ square, double } });
     const source_id = try program.add_function(func);
 
     const vjp_id = try vjp(std.testing.allocator, &program, source_id, "vjp", .{
@@ -1564,7 +1549,7 @@ test "vjp accumulates duplicate output seeds" {
 
     const x = try b.param_tensor(.f32, &.{});
     const y = try b.multiply(x, x);
-    const func = try b.finish(&.{y});
+    const func = try b.finish(.{ .returns = &.{y} });
     const source_id = try program.add_function(func);
 
     const vjp_id = try vjp(std.testing.allocator, &program, source_id, "vjp", .{
@@ -1586,7 +1571,7 @@ test "vjp rejects invalid output selection" {
 
     const x = try b.param_tensor(.f32, &.{});
     const y = try b.multiply(x, x);
-    const func = try b.finish(&.{y});
+    const func = try b.finish(.{ .returns = &.{y} });
     const source_id = try program.add_function(func);
 
     try std.testing.expectError(
@@ -1608,7 +1593,7 @@ test "vjp can include primals before gradients" {
 
     const x = try b.param_tensor(.f32, &.{ 2, 2 });
     const y = try b.multiply(x, x);
-    const func = try b.finish(&.{y});
+    const func = try b.finish(.{ .returns = &.{y} });
     const source_id = try program.add_function(func);
 
     const vjp_id = try vjp(std.testing.allocator, &program, source_id, "vjp_with_primals", .{
@@ -1632,7 +1617,7 @@ test "vjp distinguishes an unsupported derivative configuration" {
         .limit_indices = &.{6},
         .strides = &.{2},
     });
-    const source = try program.add_function(try b.finish(&.{output}));
+    const source = try program.add_function(try b.finish(.{ .returns = &.{output} }));
 
     try std.testing.expectError(
         error.UnsupportedDerivative,
@@ -1656,7 +1641,7 @@ test "dot_general vjp supports 2 batch dims" {
         .rhs_contracting_dims = &.{2},
     });
 
-    const func = try b.finish(&.{out});
+    const func = try b.finish(.{ .returns = &.{out} });
     const source_id = try program.add_function(func);
 
     const vjp_id = try vjp(std.testing.allocator, &program, source_id, "vjp", .{});
@@ -1692,7 +1677,7 @@ test "dot_general vjp supports non-prefix batch dims" {
         .rhs_contracting_dims = &.{3},
     });
 
-    const func = try b.finish(&.{out});
+    const func = try b.finish(.{ .returns = &.{out} });
     const source_id = try program.add_function(func);
 
     const vjp_id = try vjp(std.testing.allocator, &program, source_id, "vjp", .{});
@@ -1717,7 +1702,7 @@ test "dot_general vjp supports differing batch dim positions" {
         .rhs_contracting_dims = &.{1},
     });
 
-    const func = try b.finish(&.{out});
+    const func = try b.finish(.{ .returns = &.{out} });
     const source_id = try program.add_function(func);
 
     const vjp_id = try vjp(std.testing.allocator, &program, source_id, "vjp", .{});
@@ -1742,7 +1727,7 @@ test "dot_general vjp supports multi-contract dims" {
         .rhs_contracting_dims = &.{ 2, 3 },
     });
 
-    const func = try b.finish(&.{out});
+    const func = try b.finish(.{ .returns = &.{out} });
     const source_id = try program.add_function(func);
 
     const vjp_id = try vjp(std.testing.allocator, &program, source_id, "vjp", .{});
@@ -1765,7 +1750,7 @@ test "jvp produces tangent outputs matching function output shapes" {
     const add_id = try b.add(mm_id, c_id);
     const out_id = try b.multiply(add_id, c_id);
 
-    const func = try b.finish(&.{out_id});
+    const func = try b.finish(.{ .returns = &.{out_id} });
     const source_id = try program.add_function(func);
 
     const jvp_id = try jvp(std.testing.allocator, &program, source_id, "jvp", .{});
@@ -1789,7 +1774,7 @@ fn build_repeated_square_calls(program: *pr.Program) !pr.FunctionId {
     defer callee_builder.deinit();
     const callee_input = try callee_builder.param_tensor(.f32, &.{});
     const callee_output = try callee_builder.multiply(callee_input, callee_input);
-    const callee_id = try program.add_function(try callee_builder.finish(&.{callee_output}));
+    const callee_id = try program.add_function(try callee_builder.finish(.{ .returns = &.{callee_output} }));
 
     var caller_builder = try pr.FunctionBuilder.init(program, "caller");
     defer caller_builder.deinit();
@@ -1797,7 +1782,7 @@ fn build_repeated_square_calls(program: *pr.Program) !pr.FunctionId {
     const first_outputs = (try caller_builder.call(callee_id, &.{caller_input})).outputs;
     const second_outputs = (try caller_builder.call(callee_id, &.{caller_input})).outputs;
     const sum = try caller_builder.add(first_outputs[0], second_outputs[0]);
-    return try program.add_function(try caller_builder.finish(&.{sum}));
+    return try program.add_function(try caller_builder.finish(.{ .returns = &.{sum} }));
 }
 
 test "linearize reuses a callee linearization across call sites" {
@@ -1862,7 +1847,7 @@ test "AD carries call results into nonlinear consumers" {
     const callee_input = try callee_builder.param_tensor(.f32, &.{});
     const callee_output = try callee_builder.multiply(callee_input, callee_input);
     const callee_id = try program.add_function(
-        try callee_builder.finish(&.{callee_output}),
+        try callee_builder.finish(.{ .returns = &.{callee_output} }),
     );
 
     var caller_builder = try pr.FunctionBuilder.init(&program, "fourth_power");
@@ -1870,7 +1855,7 @@ test "AD carries call results into nonlinear consumers" {
     const caller_input = try caller_builder.param_tensor(.f32, &.{});
     const call_outputs = (try caller_builder.call(callee_id, &.{caller_input})).outputs;
     const caller_output = try caller_builder.multiply(call_outputs[0], call_outputs[0]);
-    const caller = try caller_builder.finish(&.{caller_output});
+    const caller = try caller_builder.finish(.{ .returns = &.{caller_output} });
     const caller_id = try program.add_function(caller);
 
     const differentiated_id = try jvp(
@@ -1944,7 +1929,7 @@ test "jvp can include primals before tangents" {
 
     const x = try b.param_tensor(.f32, &.{ 2, 2 });
     const y = try b.multiply(x, x);
-    const func = try b.finish(&.{y});
+    const func = try b.finish(.{ .returns = &.{y} });
     const source_id = try program.add_function(func);
 
     const jvp_id = try jvp(std.testing.allocator, &program, source_id, "jvp_with_primals", .{
@@ -1965,7 +1950,7 @@ test "jvp routes maximum tangents through the selected operand" {
     defer b.deinit();
     const lhs = try b.param_tensor(.f32, &.{2});
     const rhs = try b.param_tensor(.f32, &.{2});
-    const source = try b.finish(&.{try b.maximum(lhs, rhs)});
+    const source = try b.finish(.{ .returns = &.{try b.maximum(lhs, rhs)} });
     const source_id = try program.add_function(source);
     const differentiated_id = try jvp(
         std.testing.allocator,
@@ -2031,7 +2016,7 @@ test "dot_general jvp with batch dims" {
         .rhs_contracting_dims = &.{2},
     });
 
-    const func = try b.finish(&.{out});
+    const func = try b.finish(.{ .returns = &.{out} });
     const source_id = try program.add_function(func);
 
     const jvp_id = try jvp(std.testing.allocator, &program, source_id, "jvp", .{});

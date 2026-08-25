@@ -94,7 +94,7 @@ test "JVP composes over a generated JVP program" {
     const x = try builder.param_tensor(.f32, &.{});
     const x_squared = try builder.multiply(x, x);
     const x_cubed = try builder.multiply(x_squared, x);
-    const source = try program.add_function(try builder.finish(&.{x_cubed}));
+    const source = try program.add_function(try builder.finish(.{ .returns = &.{x_cubed} }));
 
     const first = try ad.jvp(std.testing.allocator, &program, source, "cube_jvp", .{});
     const second = try ad.jvp(std.testing.allocator, &program, first, "cube_jvp_jvp", .{});
@@ -115,7 +115,7 @@ test "JVP of VJP computes a Hessian-vector product" {
     const x_squared = try builder.multiply(x, x);
     const x_cubed = try builder.multiply(x_squared, x);
     const loss = try builder.reduce(x_cubed, .{ .axes = &.{0}, .operation = .sum });
-    const source = try program.add_function(try builder.finish(&.{loss}));
+    const source = try program.add_function(try builder.finish(.{ .returns = &.{loss} }));
 
     const gradient = try ad.vjp(std.testing.allocator, &program, source, "sum_of_cubes_vjp", .{});
     const hvp = try ad.jvp(std.testing.allocator, &program, gradient, "sum_of_cubes_hvp", .{});

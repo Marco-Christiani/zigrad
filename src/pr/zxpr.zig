@@ -123,7 +123,7 @@ test "zxpr format" {
     const a = try b.param_tensor(.f32, &.{ 2, 3 });
     const c = try b.param_tensor(.f32, &.{ 3, 2 });
     const d = try b.mm(a, c);
-    const func = try b.finish(&.{d});
+    const func = try b.finish(.{ .returns = &.{d} });
 
     var buf: [512]u8 = undefined;
     var w: Writer = .fixed(&buf);
@@ -166,7 +166,7 @@ test "zxpr with transpose shows permutation" {
 
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const y = try b.transpose(x, &.{ 1, 0 });
-    const func = try b.finish(&.{y});
+    const func = try b.finish(.{ .returns = &.{y} });
 
     var buf: [256]u8 = undefined;
     var w: Writer = .fixed(&buf);
@@ -197,7 +197,7 @@ test "zxpr kernelize region annotations" {
     try b.pop_region();
 
     const out = try b.add(add2, c);
-    var func = try b.finish(&.{out});
+    var func = try b.finish(.{ .returns = &.{out} });
     func.annotations = &.{.{ .name = "example.function", .value = .unit }};
 
     var buf: [512]u8 = undefined;
@@ -219,19 +219,19 @@ test "program zxpr exposes monotonic function identities" {
     const saved = program.checkpoint_appends();
     var removed_builder = try pr.FunctionBuilder.init(&program, "removed");
     defer removed_builder.deinit();
-    _ = try program.add_function(try removed_builder.finish(&.{}));
+    _ = try program.add_function(try removed_builder.finish(.{ .returns = &.{} }));
     program.restore_appends(saved);
 
     var callee_builder = try pr.FunctionBuilder.init(&program, "callee");
     defer callee_builder.deinit();
     const callee_input = try callee_builder.param_tensor(.f32, &.{});
-    const callee_id = try program.add_function(try callee_builder.finish(&.{callee_input}));
+    const callee_id = try program.add_function(try callee_builder.finish(.{ .returns = &.{callee_input} }));
 
     var caller_builder = try pr.FunctionBuilder.init(&program, "caller");
     defer caller_builder.deinit();
     const caller_input = try caller_builder.param_tensor(.f32, &.{});
     const call_op = try caller_builder.call(callee_id, &.{caller_input});
-    _ = try program.add_function(try caller_builder.finish(call_op.outputs));
+    _ = try program.add_function(try caller_builder.finish(.{ .returns = call_op.outputs }));
 
     var writer: Writer.Allocating = .init(std.testing.allocator);
     defer writer.deinit();
@@ -252,7 +252,7 @@ test "emit_program binary format parses" {
     var b = try pr.FunctionBuilder.init(&program, "main");
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{1});
-    const func = try b.finish(&.{x});
+    const func = try b.finish(.{ .returns = &.{x} });
     _ = try program.add_function(func);
 
     var output_writer: Writer.Allocating = .init(std.testing.allocator);

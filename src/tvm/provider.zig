@@ -226,7 +226,7 @@ test "TVM matcher recognizes matrix matmul" {
     const lhs = try builder.param_tensor(.f32, &.{ 4, 8 });
     const rhs = try builder.param_tensor(.f32, &.{ 8, 2 });
     const output = try builder.mm(lhs, rhs);
-    const func = try builder.finish(&.{output});
+    const func = try builder.finish(.{ .returns = &.{output} });
 
     const matched = TvmProvider.match_impl(undefined, func, 0) orelse
         return error.TestUnexpectedResult;

@@ -327,7 +327,7 @@ fn build_outlined_function(
 
     const returns = try vars.alloc_values(desc.outputs);
     defer scratch.free(returns);
-    var outlined = try builder.finish(returns);
+    var outlined = try builder.finish(.{ .returns = returns });
     outlined.annotations = try pr.dupe_annotations(program.allocator(), function_annotations);
     return outlined;
 }
@@ -374,7 +374,7 @@ fn build_caller_function(
 
     const returns = try vars.alloc_values(source.returns);
     defer scratch.free(returns);
-    return try builder.finish(returns);
+    return try builder.finish(.{ .returns = returns });
 }
 
 fn build_outlined_regions(
@@ -476,7 +476,7 @@ test "apply outlines a nested region and preserves surrounding regions" {
     const result = try builder.add(logged, x);
     try builder.pop_region();
 
-    const main = try builder.finish(&.{result});
+    const main = try builder.finish(.{ .returns = &.{result} });
     const main_id = try program.add_function(main);
 
     const target = for (main.regions) |region| {
@@ -541,7 +541,7 @@ test "Pass consumes outline and transfers independent annotations" {
     });
     const result = try builder.mm(lhs, rhs);
     try builder.pop_region();
-    _ = try program.add_function(try builder.finish(&.{result}));
+    _ = try program.add_function(try builder.finish(.{ .returns = &.{result} }));
 
     var ctx = compilation.Context{ .allocator = testing.allocator, .io = testing.io };
     _ = try (Pass{}).run(&program, &ctx);
@@ -577,7 +577,7 @@ test "apply preserves multiple region outputs" {
     const logarithm = try builder.log(y);
     try builder.pop_region();
 
-    const main = try builder.finish(&.{ exponential, logarithm });
+    const main = try builder.finish(.{ .returns = &.{ exponential, logarithm } });
     const main_id = try program.add_function(main);
     _ = try apply(&program, testing.allocator, main_id, main.regions[0].id, .{
         .function_name = "main_pair",

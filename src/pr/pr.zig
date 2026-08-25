@@ -994,9 +994,14 @@ pub const ValidationError = error{
     DuplicateAnnotationName,
 };
 
-/// Errors from FunctionBuilder: validation failures (caught eagerly at
-///  `finish`) plus allocation failures from the program arena.
-pub const BuildError = ValidationError || Allocator.Error;
+/// Errors from function construction, finalization, validation, and program
+///  arena allocation.
+pub const BuildError = ValidationError || Allocator.Error || error{
+    ParameterNotOwned,
+    DuplicateParameterSelection,
+    ExcludedParameterInUse,
+    ExcludedParameterReturned,
+};
 
 fn same_tensor_signature(a: Tensor, b: Tensor) bool {
     if (a.dtype != b.dtype) return false;
@@ -1118,6 +1123,20 @@ pub fn dupe_annotations(allocator: Allocator, annotations: []const Annotation) B
 /// Use `push_region` / `pop_region` to annotate op ranges with compilation
 ///  hints (outlining, kernelization). Regions are materialized at `finish`.
 pub const FunctionBuilder = struct {
+    /// Values and parameter policy supplied when completing a function.
+    pub const FinishOptions = struct {
+        /// Values returned by the completed function.
+        returns: []const *Var,
+        /// Parameters retained in the function signature. A selected list may
+        ///  reorder parameters but must contain only distinct builder parameters.
+        parameters: union(enum) {
+            /// Retain every parameter in creation order.
+            all,
+            /// Retain the listed parameters in the supplied order.
+            selected: []const *Var,
+        } = .all,
+    };
+
     const ResultTypes = union(enum) {
         /// Borrow abstract values already owned by the program.
         borrow_avals: []const Aval,
@@ -1512,10 +1531,14 @@ pub const FunctionBuilder = struct {
 
     /// Finalize and validate the function.
     ///
-    /// Open regions are closed before validation.
+    /// Open regions are closed during finalization.
     ///
     /// The builder must not be used again except to call `deinit`.
-    pub fn finish(self: *FunctionBuilder, returns: []const *Var) BuildError!Function {
+    pub fn finish(
+        self: *FunctionBuilder,
+        /// Function signature and parameter-retention policy.
+        options: FinishOptions,
+    ) BuildError!Function {
         const a = self.alloc();
 
         for (self.ops_list.items) |op| try ops.validate(op);
@@ -1523,19 +1546,78 @@ pub const FunctionBuilder = struct {
             try self.pop_region();
         }
 
-        const stored_returns = try a.dupe(*Var, returns);
+        const stored_params = switch (options.parameters) {
+            .all => self.params_list.items,
+            .selected => |selected| try self.select_parameters(selected, options.returns),
+        };
+        const stored_returns = try a.dupe(*Var, options.returns);
+        const var_count = self.assign_var_ids(stored_params);
         const func = Function{
             .name = self.name,
-            .params = self.params_list.items,
+            .params = stored_params,
             .returns = stored_returns,
             .ops = self.ops_list.items,
             .regions = self.completed_regions.items,
-            .var_count = self.next_var_id,
+            .var_count = var_count,
         };
         self.params_list = .empty;
         self.ops_list = .empty;
         self.completed_regions = .empty;
         return func;
+    }
+
+    fn select_parameters(
+        self: *FunctionBuilder,
+        /// Builder parameters to retain in signature order.
+        selected: []const *Var,
+        /// Function returns used to reject excluded returned parameters.
+        returns: []const *Var,
+    ) BuildError![]*Var {
+        for (selected, 0..) |candidate, index| {
+            var owned = false;
+            for (self.params_list.items) |param| {
+                if (candidate == param) {
+                    owned = true;
+                    break;
+                }
+            }
+            if (!owned) return error.ParameterNotOwned;
+            for (selected[0..index]) |prior| {
+                if (candidate == prior) return error.DuplicateParameterSelection;
+            }
+        }
+
+        for (self.params_list.items) |param| {
+            var retained = false;
+            for (selected) |candidate| {
+                if (param == candidate) {
+                    retained = true;
+                    break;
+                }
+            }
+            if (retained) continue;
+            if (param.first_use != null) return error.ExcludedParameterInUse;
+            for (returns) |return_var| {
+                if (param == return_var) return error.ExcludedParameterReturned;
+            }
+        }
+        return try self.alloc().dupe(*Var, selected);
+    }
+
+    // Var ids form a dense index space used by lowering and serialization.
+    fn assign_var_ids(self: *FunctionBuilder, params: []const *Var) u32 {
+        var dense_id: u32 = 0;
+        for (params) |param| {
+            param.id = dense_id;
+            dense_id += 1;
+        }
+        for (self.ops_list.items) |op| {
+            for (op.outputs) |output| {
+                output.id = dense_id;
+                dense_id += 1;
+            }
+        }
+        return dense_id;
     }
 };
 
@@ -1570,11 +1652,11 @@ test "Program.reserve_unique_function_name increments occupied names" {
 
     var first = try FunctionBuilder.init(&program, "generated");
     defer first.deinit();
-    _ = try program.add_function(try first.finish(&.{}));
+    _ = try program.add_function(try first.finish(.{ .returns = &.{} }));
 
     var second = try FunctionBuilder.init(&program, "generated_1");
     defer second.deinit();
-    _ = try program.add_function(try second.finish(&.{}));
+    _ = try program.add_function(try second.finish(.{ .returns = &.{} }));
 
     try std.testing.expectEqualStrings("available", try program.reserve_unique_function_name("available"));
     try std.testing.expectEqualStrings("available_1", try program.reserve_unique_function_name("available"));
@@ -1587,14 +1669,14 @@ test "Program.restore discards appended functions and reservations" {
 
     var first = try FunctionBuilder.init(&program, "first");
     defer first.deinit();
-    const first_id = try program.add_function(try first.finish(&.{}));
+    const first_id = try program.add_function(try first.finish(.{ .returns = &.{} }));
     try std.testing.expectEqual(@as(FunctionId, @enumFromInt(0)), first_id);
 
     const saved = program.checkpoint_appends();
     _ = try program.reserve_unique_function_name("reserved");
     var second = try FunctionBuilder.init(&program, "second");
     defer second.deinit();
-    const second_id = try program.add_function(try second.finish(&.{}));
+    const second_id = try program.add_function(try second.finish(.{ .returns = &.{} }));
     try std.testing.expectEqual(@as(FunctionId, @enumFromInt(1)), second_id);
 
     program.restore_appends(saved);
@@ -1606,7 +1688,7 @@ test "Program.restore discards appended functions and reservations" {
 
     var third = try FunctionBuilder.init(&program, "third");
     defer third.deinit();
-    const third_id = try program.add_function(try third.finish(&.{}));
+    const third_id = try program.add_function(try third.finish(.{ .returns = &.{} }));
     try std.testing.expectEqual(@as(FunctionId, @enumFromInt(2)), third_id);
     try std.testing.expect(program.get_function_by_id(second_id) == null);
 }
@@ -1617,13 +1699,13 @@ test "Program resolves explicit and unique-root entries" {
 
     var callee_builder = try FunctionBuilder.init(&program, "callee");
     defer callee_builder.deinit();
-    const callee = try program.add_function(try callee_builder.finish(&.{}));
+    const callee = try program.add_function(try callee_builder.finish(.{ .returns = &.{} }));
 
     var caller_builder = try FunctionBuilder.init(&program, "caller");
     defer caller_builder.deinit();
     const call_op = try caller_builder.call(callee, &.{});
     try std.testing.expectEqual(@as(usize, 0), call_op.outputs.len);
-    const caller = try program.add_function(try caller_builder.finish(&.{}));
+    const caller = try program.add_function(try caller_builder.finish(.{ .returns = &.{} }));
 
     try std.testing.expectEqual(caller, try program.resolve_entry());
     try program.set_entry(callee);
@@ -1637,7 +1719,7 @@ test "Program requires selection among multiple roots" {
     inline for (.{ "first", "second" }) |name| {
         var builder = try FunctionBuilder.init(&program, name);
         defer builder.deinit();
-        _ = try program.add_function(try builder.finish(&.{}));
+        _ = try program.add_function(try builder.finish(.{ .returns = &.{} }));
     }
 
     try std.testing.expectError(error.EntrySelectionRequired, program.resolve_entry());
@@ -1649,13 +1731,13 @@ test "Program checkpoint restores entry selection" {
 
     var first_builder = try FunctionBuilder.init(&program, "first");
     defer first_builder.deinit();
-    const first = try program.add_function(try first_builder.finish(&.{}));
+    const first = try program.add_function(try first_builder.finish(.{ .returns = &.{} }));
     try program.set_entry(first);
     const saved = program.checkpoint_appends();
 
     var second_builder = try FunctionBuilder.init(&program, "second");
     defer second_builder.deinit();
-    const second = try program.add_function(try second_builder.finish(&.{}));
+    const second = try program.add_function(try second_builder.finish(.{ .returns = &.{} }));
     try program.set_entry(second);
 
     program.restore_appends(saved);
@@ -1686,7 +1768,7 @@ test "FunctionBuilder owns operation parameters" {
     dims[0] = 7;
 
     try std.testing.expectEqualSlices(i64, &.{ 2, 3 }, output.defining_op.?.params.reshape.out_shape);
-    _ = try builder.finish(&.{output});
+    _ = try builder.finish(.{ .returns = &.{output} });
 }
 
 test "FunctionBuilder broadcast_in_dim basic" {
@@ -1698,7 +1780,7 @@ test "FunctionBuilder broadcast_in_dim basic" {
 
     const x = try b.param_tensor(.f32, &.{3});
     const y = try b.broadcast_in_dim(x, &.{ 2, 3 }, &.{1});
-    const func = try b.finish(&.{y});
+    const func = try b.finish(.{ .returns = &.{y} });
     try validate_ops_in_func(func);
 }
 
@@ -1711,7 +1793,7 @@ test "FunctionBuilder transpose validation" {
 
     const x = try b.param_tensor(.f32, &.{ 2, 3, 4 });
     const y = try b.transpose(x, &.{ 2, 0, 1 });
-    const func = try b.finish(&.{y});
+    const func = try b.finish(.{ .returns = &.{y} });
     try validate_ops_in_func(func);
 }
 
@@ -1724,7 +1806,7 @@ test "FunctionBuilder reduce basic" {
 
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const y = try b.reduce(x, .{ .axes = &.{0}, .operation = .sum });
-    const func = try b.finish(&.{y});
+    const func = try b.finish(.{ .returns = &.{y} });
     try validate_ops_in_func(func);
 }
 
@@ -1741,14 +1823,98 @@ test "FunctionBuilder finish preserves state after validation failure" {
     const valid_aval = output.aval;
     output.aval = .{ .tensor = .{ .dtype = .f64, .shape = .{ .dims = &.{ 2, 3 } } } };
 
-    try std.testing.expectError(error.AddTypeMismatch, builder.finish(&.{output}));
+    try std.testing.expectError(error.AddTypeMismatch, builder.finish(.{ .returns = &.{output} }));
     try std.testing.expectEqual(@as(usize, 2), builder.params_list.items.len);
     try std.testing.expectEqual(@as(usize, 1), builder.ops_list.items.len);
 
     output.aval = valid_aval;
-    const function = try builder.finish(&.{output});
+    const function = try builder.finish(.{ .returns = &.{output} });
     try std.testing.expectEqual(@as(usize, 2), function.params.len);
     try std.testing.expectEqual(@as(usize, 1), function.ops.len);
+}
+
+test "FunctionBuilder finish selects and orders parameters" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var builder = try FunctionBuilder.init(&program, "main");
+    defer builder.deinit();
+
+    const lhs = try builder.param_tensor(.f32, &.{2});
+    _ = try builder.param_tensor(.f32, &.{2});
+    const rhs = try builder.param_tensor(.f32, &.{2});
+    const output = try builder.add(lhs, rhs);
+    const function = try builder.finish(.{
+        .returns = &.{output},
+        .parameters = .{ .selected = &.{ rhs, lhs } },
+    });
+
+    try std.testing.expectEqualSlices(*Var, &.{ rhs, lhs }, function.params);
+    try std.testing.expectEqual(@as(u32, 0), rhs.id);
+    try std.testing.expectEqual(@as(u32, 1), lhs.id);
+    try std.testing.expectEqual(@as(u32, 2), output.id);
+    try std.testing.expectEqual(@as(u32, 3), function.var_count);
+}
+
+test "FunctionBuilder finish rejects invalid parameter selections" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    {
+        var builder = try FunctionBuilder.init(&program, "used");
+        defer builder.deinit();
+        const lhs = try builder.param_tensor(.f32, &.{2});
+        const rhs = try builder.param_tensor(.f32, &.{2});
+        const output = try builder.add(lhs, rhs);
+
+        try std.testing.expectError(
+            error.DuplicateParameterSelection,
+            builder.finish(.{
+                .returns = &.{output},
+                .parameters = .{ .selected = &.{ lhs, lhs } },
+            }),
+        );
+        try std.testing.expectError(
+            error.ExcludedParameterInUse,
+            builder.finish(.{
+                .returns = &.{output},
+                .parameters = .{ .selected = &.{lhs} },
+            }),
+        );
+
+        const function = try builder.finish(.{ .returns = &.{output} });
+        try std.testing.expectEqual(@as(usize, 2), function.params.len);
+    }
+
+    {
+        var builder = try FunctionBuilder.init(&program, "returned");
+        defer builder.deinit();
+        const retained = try builder.param_tensor(.f32, &.{2});
+        const returned = try builder.param_tensor(.f32, &.{2});
+        try std.testing.expectError(
+            error.ExcludedParameterReturned,
+            builder.finish(.{
+                .returns = &.{returned},
+                .parameters = .{ .selected = &.{retained} },
+            }),
+        );
+    }
+
+    {
+        var owner = try FunctionBuilder.init(&program, "owner");
+        defer owner.deinit();
+        const owned = try owner.param_tensor(.f32, &.{2});
+        var other = try FunctionBuilder.init(&program, "other");
+        defer other.deinit();
+        const foreign = try other.param_tensor(.f32, &.{2});
+        try std.testing.expectError(
+            error.ParameterNotOwned,
+            owner.finish(.{
+                .returns = &.{owned},
+                .parameters = .{ .selected = &.{foreign} },
+            }),
+        );
+    }
 }
 
 test "FunctionBuilder releases allocations after every allocation failure" {
@@ -1763,7 +1929,25 @@ test "FunctionBuilder releases allocations after every allocation failure" {
             const rhs = try builder.param_tensor(.f32, &.{ 2, 3 });
             try builder.push_region("sum", &.{});
             const output = try builder.add(lhs, rhs);
-            const function = try builder.finish(&.{output});
+            const function = try builder.finish(.{ .returns = &.{output} });
+            _ = try program.add_function(function);
+        }
+    }.build, .{});
+
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn build(allocator: Allocator) !void {
+            var program = Program.init(allocator);
+            defer program.deinit();
+            var builder = try FunctionBuilder.init(&program, "selected");
+            defer builder.deinit();
+
+            const retained = try builder.param_tensor(.f32, &.{2});
+            _ = try builder.param_tensor(.f32, &.{2});
+            const output = try builder.exp(retained);
+            const function = try builder.finish(.{
+                .returns = &.{output},
+                .parameters = .{ .selected = &.{retained} },
+            });
             _ = try program.add_function(function);
         }
     }.build, .{});
@@ -1777,7 +1961,7 @@ test "FunctionBuilder literal scalar" {
     defer b.deinit();
 
     const one = try b.literal_scalar(.{ .f32 = 1.0 });
-    const func = try b.finish(&.{one});
+    const func = try b.finish(.{ .returns = &.{one} });
     try validate_ops_in_func(func);
 }
 
@@ -1807,7 +1991,7 @@ test "region push/pop materializes regions" {
     try b.pop_region();
 
     const f = try b.add(e, a_id);
-    const func = try b.finish(&.{f});
+    const func = try b.finish(.{ .returns = &.{f} });
 
     try std.testing.expectEqual(@as(usize, 1), func.regions.len);
     try std.testing.expectEqual(@as(u32, 0), func.regions[0].id);
@@ -1836,7 +2020,7 @@ test "region annotations accept namespaced values" {
     annotation_name[0] = 'X';
     annotation_value[0] = 'X';
 
-    const func = try builder.finish(&.{result});
+    const func = try builder.finish(.{ .returns = &.{result} });
     const found = func.regions[0].find_annotation("example.id").?;
     try std.testing.expectEqualStrings("v1", found.value.as_string().?);
 }
@@ -1877,7 +2061,7 @@ test "nested regions" {
     const f = try b.add(d, a_id);
     try b.pop_region();
 
-    const func = try b.finish(&.{f});
+    const func = try b.finish(.{ .returns = &.{f} });
 
     try std.testing.expectEqual(@as(usize, 2), func.regions.len);
     // Inner region completed first
@@ -1912,7 +2096,7 @@ test "regions_matching filters by predicate" {
     const e = try b.multiply(d, c_id);
     try b.pop_region();
 
-    const func = try b.finish(&.{e});
+    const func = try b.finish(.{ .returns = &.{e} });
 
     const is_kernelized = struct {
         fn f(region: Region) bool {
@@ -1941,7 +2125,7 @@ test "empty region not materialized" {
     try b.pop_region();
 
     const d = try b.add(a_id, c_id);
-    const func = try b.finish(&.{d});
+    const func = try b.finish(.{ .returns = &.{d} });
 
     try std.testing.expectEqual(@as(usize, 0), func.regions.len);
 }
@@ -1971,7 +2155,7 @@ test "use-list basics" {
     // z has one use
     try std.testing.expect(z.has_one_use());
 
-    _ = try b.finish(&.{w});
+    _ = try b.finish(.{ .returns = &.{w} });
 }
 
 test "FunctionBuilder assigns stable op ids" {
@@ -1986,7 +2170,7 @@ test "FunctionBuilder assigns stable op ids" {
 
     const z = try b.add(x, y);
     const w = try b.multiply(z, y);
-    const func = try b.finish(&.{w});
+    const func = try b.finish(.{ .returns = &.{w} });
 
     try std.testing.expectEqual(@as(u32, 0), func.ops[0].id);
     try std.testing.expectEqual(@as(u32, 1), func.ops[1].id);
@@ -2032,5 +2216,5 @@ test "FunctionBuilder.custom_call owns output abstract values" {
     dims[0] = 7;
 
     try std.testing.expectEqualSlices(i64, &.{ 2, 3 }, call_op.outputs[0].aval.as_tensor().shape.dims);
-    _ = try builder.finish(call_op.outputs);
+    _ = try builder.finish(.{ .returns = call_op.outputs });
 }

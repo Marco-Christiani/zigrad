@@ -183,7 +183,7 @@ test connected_range {
     const mm = try builder.mm(lhs, rhs);
     const sum = try builder.add(mm, bias);
     const output = try builder.exp(sum);
-    const func = try builder.finish(&.{output});
+    const func = try builder.finish(.{ .returns = &.{output} });
 
     const options = ConnectedOptions{
         .accepts = accept_mm_or_pointwise,
@@ -210,7 +210,7 @@ test "connected_range stops before an unrelated supported operation" {
     const mm = try builder.mm(lhs, rhs);
     const unrelated = try builder.exp(independent);
     const output = try builder.add(mm, unrelated);
-    const func = try builder.finish(&.{output});
+    const func = try builder.finish(.{ .returns = &.{output} });
 
     const matched = connected_range(func, 0, .{
         .accepts = accept_mm_or_pointwise,
@@ -231,7 +231,7 @@ test sequence {
     const input = try builder.param_tensor(.f32, &.{4});
     const logged = try builder.log(input);
     const output = try builder.exp(logged);
-    const func = try builder.finish(&.{output});
+    const func = try builder.finish(.{ .returns = &.{output} });
 
     try testing.expectEqual(
         Range{ .start = 0, .end = 2 },
@@ -257,7 +257,7 @@ test Operation {
     const lhs = try builder.param_tensor(.f32, &.{ 4, 8 });
     const rhs = try builder.param_tensor(.f32, &.{ 8, 2 });
     const output = try builder.mm(lhs, rhs);
-    const func = try builder.finish(&.{output});
+    const func = try builder.finish(.{ .returns = &.{output} });
 
     try testing.expect((Operation{
         .primitive = .mm,
@@ -280,7 +280,7 @@ test "value-use and operand relationships" {
     const input = try builder.param_tensor(.f32, &.{4});
     const activation = try builder.logistic(input);
     const output = try builder.multiply(input, activation);
-    const func = try builder.finish(&.{output});
+    const func = try builder.finish(.{ .returns = &.{output} });
 
     try testing.expect(activation.only_user() == func.ops[1]);
     try testing.expect(binary_operands(func.ops[1], activation, input, .unordered));

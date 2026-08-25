@@ -178,7 +178,7 @@ pub fn value_and_grad(
     }
     const selected_var = output_vars[selected_output];
     if (selected_var.as_tensor().shape.rank() != 0) return error.NonScalarOutput;
-    const source_id = try program.add_function(try source_builder.finish(output_vars));
+    const source_id = try program.add_function(try source_builder.finish(.{ .returns = output_vars }));
 
     // Request gradients only for the selected argument's leaves.
     //  `wrt` filters the VJP function's output list: cotangents for

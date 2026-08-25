@@ -313,7 +313,7 @@ test "vjp rejects a missing rule on an active differentiable path" {
         .has_side_effect = false,
         .payload = &.{},
     }, &.{input}, &.{input.aval})).outputs;
-    const source = try source_builder.finish(outputs);
+    const source = try source_builder.finish(.{ .returns = outputs });
 
     var derived_builder = try pr.FunctionBuilder.init(&program, "derived");
     defer derived_builder.deinit();

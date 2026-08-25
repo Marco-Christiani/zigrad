@@ -112,7 +112,7 @@ pub fn trace_into(
     defer scratch.free(output_vars);
     for (output_tensors, 0..) |t, i| output_vars[i] = try t.get_var();
 
-    const func_pr = try builder.finish(output_vars);
+    const func_pr = try builder.finish(.{ .returns = output_vars });
     return try program.add_function(func_pr);
 }
 

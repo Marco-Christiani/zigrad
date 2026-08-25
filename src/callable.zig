@@ -256,7 +256,7 @@ test "Compiled.call waits before releasing an execution event" {
         var builder = try pr.FunctionBuilder.init(&program, "main");
         defer builder.deinit();
         const input = try builder.param_tensor(.f32, &.{1});
-        break :function try program.add_function(try builder.finish(&.{input}));
+        break :function try program.add_function(try builder.finish(.{ .returns = &.{input} }));
     };
     try program.set_entry(function);
     var traced = Traced(Function.identity, @TypeOf(specs)){

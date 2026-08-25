@@ -1073,7 +1073,7 @@ fn multi_to_flat(idx: []const usize, shape: []const i64) usize {
 const testing = std.testing;
 
 fn build_and_finish(program: *pr.Program, b: *pr.FunctionBuilder, returns: []const *pr.Var) !pr.Function {
-    const func = try b.finish(returns);
+    const func = try b.finish(.{ .returns = returns });
     _ = try program.add_function(func);
     return func;
 }

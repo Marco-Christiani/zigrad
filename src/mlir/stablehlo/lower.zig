@@ -596,7 +596,7 @@ test "lowering produces verified bytecode" {
         const mm_id = try b.mm(a, b_id);
         const add_id = try b.add(mm_id, c);
         const out_id = try b.multiply(add_id, c);
-        const func = try b.finish(&.{out_id});
+        const func = try b.finish(.{ .returns = &.{out_id} });
         break :blk try program.add_function(func);
     };
 
@@ -617,7 +617,7 @@ test "lowering supports fixed contraction forms" {
         const out = try b.dot(lhs, rhs);
         const bytes = try lower_function_to_mlir(
             std.testing.allocator,
-            try b.finish(&.{out}),
+            try b.finish(.{ .returns = &.{out} }),
             .mlir_bytecode,
         );
         defer std.testing.allocator.free(bytes);
@@ -631,7 +631,7 @@ test "lowering supports fixed contraction forms" {
         const out = try b.mm(lhs, rhs);
         const bytes = try lower_function_to_mlir(
             std.testing.allocator,
-            try b.finish(&.{out}),
+            try b.finish(.{ .returns = &.{out} }),
             .mlir_bytecode,
         );
         defer std.testing.allocator.free(bytes);
@@ -645,7 +645,7 @@ test "lowering supports fixed contraction forms" {
         const out = try b.bmm(lhs, rhs);
         const bytes = try lower_function_to_mlir(
             std.testing.allocator,
-            try b.finish(&.{out}),
+            try b.finish(.{ .returns = &.{out} }),
             .mlir_bytecode,
         );
         defer std.testing.allocator.free(bytes);
@@ -662,13 +662,13 @@ test "lowering keeps non-entry functions" {
     var fwd_builder = try pr.FunctionBuilder.init(&program, "forward");
     defer fwd_builder.deinit();
     const fwd_x = try fwd_builder.param_tensor(.f32, &.{2});
-    const fwd = try fwd_builder.finish(&.{fwd_x});
+    const fwd = try fwd_builder.finish(.{ .returns = &.{fwd_x} });
     _ = try program.add_function(fwd);
 
     var bwd_builder = try pr.FunctionBuilder.init(&program, "backward");
     defer bwd_builder.deinit();
     const bwd_x = try bwd_builder.param_tensor(.f32, &.{2});
-    const bwd = try bwd_builder.finish(&.{bwd_x});
+    const bwd = try bwd_builder.finish(.{ .returns = &.{bwd_x} });
     const bwd_id = try program.add_function(bwd);
 
     const text = try lower_program_to_mlir(testing.allocator, &program, bwd_id, .mlir_text);
@@ -687,20 +687,20 @@ test "lowering renames non-entry main" {
     const checkpoint = program.checkpoint_appends();
     var removed_builder = try pr.FunctionBuilder.init(&program, "removed");
     defer removed_builder.deinit();
-    _ = try program.add_function(try removed_builder.finish(&.{}));
+    _ = try program.add_function(try removed_builder.finish(.{ .returns = &.{} }));
     program.restore_appends(checkpoint);
 
     var main_builder = try pr.FunctionBuilder.init(&program, "main");
     defer main_builder.deinit();
     const main_x = try main_builder.param_tensor(.f32, &.{2});
-    const main_fn = try main_builder.finish(&.{main_x});
+    const main_fn = try main_builder.finish(.{ .returns = &.{main_x} });
     const main_id = try program.add_function(main_fn);
 
     var other_builder = try pr.FunctionBuilder.init(&program, "backward");
     defer other_builder.deinit();
     const other_x = try other_builder.param_tensor(.f32, &.{2});
     const other_call = try other_builder.call(main_id, &.{other_x});
-    const other_fn = try other_builder.finish(other_call.outputs);
+    const other_fn = try other_builder.finish(.{ .returns = other_call.outputs });
     const other_id = try program.add_function(other_fn);
 
     const text = try lower_program_to_mlir(testing.allocator, &program, other_id, .mlir_text);
@@ -723,7 +723,7 @@ test "lowering supports reshape/broadcast/transpose" {
     const r = try b.reshape(t, &.{6});
     const y = try b.broadcast_in_dim(r, &.{ 2, 6 }, &.{1});
 
-    const func = try b.finish(&.{y});
+    const func = try b.finish(.{ .returns = &.{y} });
     const entry_id = try program.add_function(func);
 
     const bc = try lower_program_to_mlir(std.testing.allocator, &program, entry_id, .mlir_bytecode);
@@ -745,7 +745,7 @@ test "lowering supports custom_call" {
     }, &.{x}, &.{x.aval})).outputs;
     const y = outputs[0];
 
-    const func = try b.finish(&.{y});
+    const func = try b.finish(.{ .returns = &.{y} });
     const entry_id = try program.add_function(func);
 
     const bc = try lower_program_to_mlir(std.testing.allocator, &program, entry_id, .mlir_bytecode);
@@ -770,7 +770,7 @@ test "lowering supports multi-output custom_call" {
     const lg = try b.emit(.{ .log = {} }, &.{y});
     try b.pop_region();
 
-    const func = try b.finish(&.{ ex, lg });
+    const func = try b.finish(.{ .returns = &.{ ex, lg } });
     const entry_id = try program.add_function(func);
     try outline_kernel_requests_for_test(&program);
 
@@ -827,7 +827,7 @@ test "lowering supports vjp matmul demo" {
         const mm_id = try b.mm(a, b_id);
         const add_id = try b.add(mm_id, c);
         const out_id = try b.multiply(add_id, c);
-        const func = try b.finish(&.{out_id});
+        const func = try b.finish(.{ .returns = &.{out_id} });
         break :blk try program.add_function(func);
     };
 
@@ -849,7 +849,7 @@ test "lowering can outline via region annotation" {
     try b.push_region("outlined-mm", &.{outline.annotation});
     const d = try b.mm(a, c);
     try b.pop_region();
-    const func = try b.finish(&.{d});
+    const func = try b.finish(.{ .returns = &.{d} });
     const entry_id = try program.add_function(func);
 
     var pass_ctx = compilation.Context{ .allocator = std.testing.allocator, .io = std.testing.io };
@@ -889,7 +889,7 @@ test "lower convolution" {
             .output_spatial_dimensions = &.{ 1, 2 },
         },
     });
-    const func = try b.finish(&.{output});
+    const func = try b.finish(.{ .returns = &.{output} });
     const entry_id = try program.add_function(func);
 
     const text = try lower_program_to_mlir(testing.allocator, &program, entry_id, .mlir_text);
@@ -922,7 +922,7 @@ test "lower operation outlines kernelize-annotated region" {
     const out = try b.multiply(sum, bias);
     try b.pop_region();
 
-    const func = try b.finish(&.{out});
+    const func = try b.finish(.{ .returns = &.{out} });
     const entry_id = try program.add_function(func);
     try outline_kernel_requests_for_test(&program);
 
@@ -952,7 +952,7 @@ test "lower operation outlines mm-add kernelize region" {
     const out = try b.add(mm, bias);
     try b.pop_region();
 
-    const func = try b.finish(&.{out});
+    const func = try b.finish(.{ .returns = &.{out} });
     const entry_id = try program.add_function(func);
     try outline_kernel_requests_for_test(&program);
 
@@ -981,7 +981,7 @@ test "lower operation outlines mm-log kernelize region" {
     const out = try b.log(mm);
     try b.pop_region();
 
-    const func = try b.finish(&.{out});
+    const func = try b.finish(.{ .returns = &.{out} });
     const entry_id = try program.add_function(func);
     try outline_kernel_requests_for_test(&program);
 
@@ -1012,7 +1012,7 @@ test "lower operation outlines near-miss kernelize region" {
     const out = try b.multiply(shifted, bias);
     try b.pop_region();
 
-    const func = try b.finish(&.{out});
+    const func = try b.finish(.{ .returns = &.{out} });
     const entry_id = try program.add_function(func);
     try outline_kernel_requests_for_test(&program);
 
@@ -1033,7 +1033,7 @@ test "lower operation produces StableHLO" {
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const y = try b.param_tensor(.f32, &.{ 3, 2 });
     const z = try b.mm(x, y);
-    const func = try b.finish(&.{z});
+    const func = try b.finish(.{ .returns = &.{z} });
 
     const entry_id = try program.add_function(func);
     var output = try lower(std.testing.allocator, &program, entry_id, .binary);
@@ -1057,7 +1057,7 @@ test "lower operation emits stablehlo.custom_call" {
         .has_side_effect = false,
     }, &.{x}, &.{x.aval})).outputs;
     const y = outputs[0];
-    const func = try b.finish(&.{y});
+    const func = try b.finish(.{ .returns = &.{y} });
     const entry_id = try program.add_function(func);
 
     var artifact = try lower(testing.allocator, &program, entry_id, .text);

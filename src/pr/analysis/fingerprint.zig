@@ -106,7 +106,7 @@ test "function ignores names, annotations, and stored ids" {
     const first_lhs = try first_builder.param_tensor(.f32, &.{2});
     const first_rhs = try first_builder.param_tensor(.f32, &.{2});
     const first_result = try first_builder.add(first_lhs, first_rhs);
-    var first = try first_builder.finish(&.{first_result});
+    var first = try first_builder.finish(.{ .returns = &.{first_result} });
     first.params[0].id = 91;
     first.params[1].id = 17;
     first.ops[0].id = 43;
@@ -121,7 +121,7 @@ test "function ignores names, annotations, and stored ids" {
     const second_lhs = try second_builder.param_tensor(.f32, &.{2});
     const second_rhs = try second_builder.param_tensor(.f32, &.{2});
     const second_result = try second_builder.add(second_lhs, second_rhs);
-    var second = try second_builder.finish(&.{second_result});
+    var second = try second_builder.finish(.{ .returns = &.{second_result} });
     second.annotations = &.{annotation};
 
     const first_fingerprint = try function(std.testing.allocator, first);
@@ -135,14 +135,14 @@ test "function includes parameters and literal values" {
     var first_builder = try pr.FunctionBuilder.init(&first_program, "first");
     defer first_builder.deinit();
     const one = try first_builder.literal_scalar(.{ .f32 = 1.0 });
-    const first = try first_builder.finish(&.{one});
+    const first = try first_builder.finish(.{ .returns = &.{one} });
 
     var second_program = pr.Program.init(std.testing.allocator);
     defer second_program.deinit();
     var second_builder = try pr.FunctionBuilder.init(&second_program, "second");
     defer second_builder.deinit();
     const two = try second_builder.literal_scalar(.{ .f32 = 2.0 });
-    const second = try second_builder.finish(&.{two});
+    const second = try second_builder.finish(.{ .returns = &.{two} });
 
     const first_fingerprint = try function(std.testing.allocator, first);
     const second_fingerprint = try function(std.testing.allocator, second);
@@ -160,7 +160,7 @@ test "function includes custom-call payload" {
         .has_side_effect = false,
         .payload = &.{1},
     }, &.{first_input}, &.{first_input.aval})).outputs;
-    const first = try first_builder.finish(first_outputs);
+    const first = try first_builder.finish(.{ .returns = first_outputs });
 
     var second_program = pr.Program.init(std.testing.allocator);
     defer second_program.deinit();
@@ -172,7 +172,7 @@ test "function includes custom-call payload" {
         .has_side_effect = false,
         .payload = &.{2},
     }, &.{second_input}, &.{second_input.aval})).outputs;
-    const second = try second_builder.finish(second_outputs);
+    const second = try second_builder.finish(.{ .returns = second_outputs });
 
     const first_fingerprint = try function(std.testing.allocator, first);
     const second_fingerprint = try function(std.testing.allocator, second);
@@ -188,7 +188,7 @@ test "function includes graph wiring" {
     const first_rhs = try first_builder.param_tensor(.f32, &.{2});
     const first_sum = try first_builder.add(first_lhs, first_rhs);
     const first_product = try first_builder.multiply(first_sum, first_lhs);
-    const first = try first_builder.finish(&.{first_product});
+    const first = try first_builder.finish(.{ .returns = &.{first_product} });
 
     var second_program = pr.Program.init(std.testing.allocator);
     defer second_program.deinit();
@@ -198,7 +198,7 @@ test "function includes graph wiring" {
     const second_rhs = try second_builder.param_tensor(.f32, &.{2});
     const second_sum = try second_builder.add(second_lhs, second_rhs);
     const second_product = try second_builder.multiply(second_sum, second_rhs);
-    const second = try second_builder.finish(&.{second_product});
+    const second = try second_builder.finish(.{ .returns = &.{second_product} });
 
     const first_fingerprint = try function(std.testing.allocator, first);
     const second_fingerprint = try function(std.testing.allocator, second);
@@ -214,7 +214,7 @@ test "function includes return order" {
     const rhs = try builder.param_tensor(.f32, &.{2});
     const sum = try builder.add(lhs, rhs);
     const product = try builder.multiply(lhs, rhs);
-    const forward = try builder.finish(&.{ sum, product });
+    const forward = try builder.finish(.{ .returns = &.{ sum, product } });
     var reverse = forward;
     var reversed_returns = [_]*pr.Var{ product, sum };
     reverse.returns = &reversed_returns;
@@ -231,14 +231,14 @@ test "function rejects unresolved calls" {
     var callee_builder = try pr.FunctionBuilder.init(&program, "callee");
     defer callee_builder.deinit();
     const callee_input = try callee_builder.param_tensor(.f32, &.{2});
-    const callee = try callee_builder.finish(&.{callee_input});
+    const callee = try callee_builder.finish(.{ .returns = &.{callee_input} });
     const callee_id = try program.add_function(callee);
 
     var builder = try pr.FunctionBuilder.init(&program, "caller");
     defer builder.deinit();
     const input = try builder.param_tensor(.f32, &.{2});
     const call_op = try builder.call(callee_id, &.{input});
-    const func = try builder.finish(call_op.outputs);
+    const func = try builder.finish(.{ .returns = call_op.outputs });
 
     try std.testing.expectError(error.UnsupportedCall, function(std.testing.allocator, func));
 }

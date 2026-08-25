@@ -115,7 +115,7 @@ const CompiledContext = struct {
         const a = try builder.param_tensor(pr_dtype, &.{ shape.m, shape.k });
         const b = try builder.param_tensor(pr_dtype, &.{ shape.k, shape.n });
         const result = try builder.mm(a, b);
-        const function = try builder.finish(&.{result});
+        const function = try builder.finish(.{ .returns = &.{result} });
         const entry = try program.add_function(function);
         try program.set_entry(entry);
 

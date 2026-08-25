@@ -43,7 +43,7 @@ test "emit_program includes entry header and zxpr output" {
     var b = try pr.FunctionBuilder.init(&program, "main_fn");
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{1});
-    const func = try b.finish(&.{x});
+    const func = try b.finish(.{ .returns = &.{x} });
     _ = try program.add_function(func);
 
     var writer_state = std.Io.Writer.Allocating.init(testing.allocator);
@@ -70,7 +70,7 @@ test "emit_program json format" {
     var b = try pr.FunctionBuilder.init(&program, "main");
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{1});
-    const func = try b.finish(&.{x});
+    const func = try b.finish(.{ .returns = &.{x} });
     _ = try program.add_function(func);
 
     var writer_state = std.Io.Writer.Allocating.init(testing.allocator);

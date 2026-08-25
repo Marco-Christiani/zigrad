@@ -425,7 +425,7 @@ test "Mirage matcher grows a connected supported region" {
     const mm = try builder.mm(lhs, rhs);
     const sum = try builder.add(mm, bias);
     const output = try builder.exp(sum);
-    const func = try builder.finish(&.{output});
+    const func = try builder.finish(.{ .returns = &.{output} });
 
     const matched = MirageProvider.match_impl(undefined, func, 0) orelse
         return error.TestUnexpectedResult;
@@ -444,7 +444,7 @@ test "Mirage matcher covers pointwise prefixes and connected branches" {
         const rhs = try builder.param_tensor(.f32, &.{ 8, 2 });
         const transformed = try builder.exp(lhs);
         const output = try builder.mm(transformed, rhs);
-        const func = try builder.finish(&.{output});
+        const func = try builder.finish(.{ .returns = &.{output} });
 
         const matched = MirageProvider.match_impl(undefined, func, 0) orelse
             return error.TestUnexpectedResult;
@@ -462,7 +462,7 @@ test "Mirage matcher covers pointwise prefixes and connected branches" {
         const exponent = try builder.exp(mm);
         const logarithm = try builder.log(mm);
         const output = try builder.add(exponent, logarithm);
-        const func = try builder.finish(&.{output});
+        const func = try builder.finish(.{ .returns = &.{output} });
 
         const matched = MirageProvider.match_impl(undefined, func, 0) orelse
             return error.TestUnexpectedResult;
@@ -480,7 +480,7 @@ test "Mirage recognizes a SiLU composite" {
     const input = try builder.param_tensor(.f32, &.{ 4, 8 });
     const activation = try builder.logistic(input);
     const output = try builder.multiply(input, activation);
-    const func = try builder.finish(&.{output});
+    const func = try builder.finish(.{ .returns = &.{output} });
 
     const matched = match_silu(func, 0) orelse return error.TestUnexpectedResult;
     try testing.expect(matched.input == input);

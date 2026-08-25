@@ -17,7 +17,7 @@ pub fn build_demo_program(program: *zg.pr.Program) !zg.pr.FunctionId {
     const add_id = try b.add(mm_id, c_id);
     const out_id = try b.multiply(add_id, c_id);
 
-    const func = try b.finish(&.{out_id});
+    const func = try b.finish(.{ .returns = &.{out_id} });
     return try program.add_function(func);
 }
 
@@ -118,7 +118,7 @@ pub fn run_custom_call_negative(
         .has_side_effect = false,
     }, &.{x}, &.{x.aval})).outputs;
     const y = outputs[0];
-    const func = try b.finish(&.{y});
+    const func = try b.finish(.{ .returns = &.{y} });
     const function = try program.add_function(func);
     try program.set_entry(function);
 
@@ -844,7 +844,7 @@ pub fn print_tvm_kernelize_pr(
 
     const out = try mul.add(d);
     const out_var = try out.get_var();
-    const func_result = try builder.finish(&.{out_var});
+    const func_result = try builder.finish(.{ .returns = &.{out_var} });
     const identity = try program.add_function(func_result);
     const func = program.get_function_by_id(identity) orelse unreachable;
 
@@ -919,7 +919,7 @@ fn build_kernelized_demo_program(
     const add_id = try b.add(acc_id, c_id);
     const out_id = try b.multiply(add_id, c_id);
 
-    const func = try b.finish(&.{out_id});
+    const func = try b.finish(.{ .returns = &.{out_id} });
     return try program.add_function(func);
 }
 
@@ -1058,7 +1058,7 @@ pub fn print_tvm_attention_pr(
     try builder.pop_region();
 
     const out_var = try out.get_var();
-    const func_result = try builder.finish(&.{out_var});
+    const func_result = try builder.finish(.{ .returns = &.{out_var} });
     const identity = try program.add_function(func_result);
     const func = program.get_function_by_id(identity) orelse unreachable;
 

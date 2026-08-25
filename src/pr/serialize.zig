@@ -785,7 +785,7 @@ test "binary PR preserves inferred entry selection" {
     defer source.deinit();
     var builder = try pr.FunctionBuilder.init(&source, "only");
     defer builder.deinit();
-    _ = try source.add_function(try builder.finish(&.{}));
+    _ = try source.add_function(try builder.finish(.{ .returns = &.{} }));
 
     var encoded: Writer.Allocating = .init(std.testing.allocator);
     defer encoded.deinit();
@@ -806,26 +806,26 @@ test "binary PR translates monotonic function identities to wire ordinals" {
     var base_builder = try pr.FunctionBuilder.init(&source, "base");
     defer base_builder.deinit();
     const base_input = try base_builder.param_tensor(.f32, &.{});
-    _ = try source.add_function(try base_builder.finish(&.{base_input}));
+    _ = try source.add_function(try base_builder.finish(.{ .returns = &.{base_input} }));
 
     const checkpoint = source.checkpoint_appends();
     var removed_builder = try pr.FunctionBuilder.init(&source, "removed");
     defer removed_builder.deinit();
     const removed_input = try removed_builder.param_tensor(.f32, &.{});
-    _ = try source.add_function(try removed_builder.finish(&.{removed_input}));
+    _ = try source.add_function(try removed_builder.finish(.{ .returns = &.{removed_input} }));
     source.restore_appends(checkpoint);
 
     var callee_builder = try pr.FunctionBuilder.init(&source, "callee");
     defer callee_builder.deinit();
     const callee_input = try callee_builder.param_tensor(.f32, &.{});
-    const callee_id = try source.add_function(try callee_builder.finish(&.{callee_input}));
+    const callee_id = try source.add_function(try callee_builder.finish(.{ .returns = &.{callee_input} }));
     try std.testing.expectEqual(@as(pr.FunctionId, @enumFromInt(2)), callee_id);
 
     var caller_builder = try pr.FunctionBuilder.init(&source, "caller");
     defer caller_builder.deinit();
     const caller_input = try caller_builder.param_tensor(.f32, &.{});
     const call_op = try caller_builder.call(callee_id, &.{caller_input});
-    _ = try source.add_function(try caller_builder.finish(call_op.outputs));
+    _ = try source.add_function(try caller_builder.finish(.{ .returns = call_op.outputs }));
 
     var encoded: Writer.Allocating = .init(std.testing.allocator);
     defer encoded.deinit();
@@ -866,7 +866,7 @@ test "convolution parameters round trip" {
             .output_spatial_dimensions = &.{ 1, 2 },
         },
     });
-    _ = try source.add_function(try builder.finish(&.{output}));
+    _ = try source.add_function(try builder.finish(.{ .returns = &.{output} }));
 
     var encoded: Writer.Allocating = .init(std.testing.allocator);
     defer encoded.deinit();

@@ -568,7 +568,7 @@ fn expect_provider_selections(first_unsupported: bool) !void {
     const second_output = try builder.emit(.{ .exp = {} }, &.{second_input});
     try builder.pop_region();
 
-    const function = try builder.finish(&.{ first_output, second_output });
+    const function = try builder.finish(.{ .returns = &.{ first_output, second_output } });
     _ = try program.add_function(function);
 
     var outline_ctx = @import("compilation.zig").Context{
@@ -645,7 +645,7 @@ test tune {
     var b = try pr.FunctionBuilder.init(&program, "main");
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
-    const func = try b.finish(&.{x});
+    const func = try b.finish(.{ .returns = &.{x} });
     _ = try program.add_function(func);
 
     var result = try tune(std.testing.io, testing.allocator, &program, &.{}, .{
@@ -668,7 +668,7 @@ test "tune requires outlined provider requests" {
     try builder.push_region("candidate", &.{kernel.provider_annotation("test")});
     const output = try builder.exp(input);
     try builder.pop_region();
-    _ = try program.add_function(try builder.finish(&.{output}));
+    _ = try program.add_function(try builder.finish(.{ .returns = &.{output} }));
 
     try testing.expectError(
         error.ProviderRegionNotOutlined,
@@ -695,7 +695,7 @@ test "tune evaluates all providers for one callable" {
     try builder.push_region("candidate", &.{kernel.providers_annotation(&.{ "first", "second" })});
     const output = try builder.exp(input);
     try builder.pop_region();
-    _ = try program.add_function(try builder.finish(&.{output}));
+    _ = try program.add_function(try builder.finish(.{ .returns = &.{output} }));
 
     var outline_ctx = @import("compilation.zig").Context{
         .allocator = testing.allocator,
@@ -745,7 +745,7 @@ test "tune retains original without an evaluator" {
     try builder.push_region("candidate", &.{kernel.provider_annotation("provider")});
     const output = try builder.exp(input);
     try builder.pop_region();
-    _ = try program.add_function(try builder.finish(&.{output}));
+    _ = try program.add_function(try builder.finish(.{ .returns = &.{output} }));
     var outline_ctx = @import("compilation.zig").Context{
         .allocator = testing.allocator,
         .io = testing.io,

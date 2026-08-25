@@ -54,7 +54,7 @@ test range {
     const input = try builder.param_tensor(.f32, &.{4});
     const logged = try builder.log(input);
     const output = try builder.exp(logged);
-    var func = try builder.finish(&.{output});
+    var func = try builder.finish(.{ .returns = &.{output} });
 
     const id = try range(
         program.allocator(),

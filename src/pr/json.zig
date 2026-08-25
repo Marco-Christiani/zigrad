@@ -549,7 +549,7 @@ test emit {
     const a = try b.param_tensor(.f32, &.{ 2, 3 });
     const c = try b.param_tensor(.f32, &.{ 3, 2 });
     const d = try b.mm(a, c);
-    const func = try b.finish(&.{d});
+    const func = try b.finish(.{ .returns = &.{d} });
 
     var buf: [2048]u8 = undefined;
     var w: Writer = .fixed(&buf);
@@ -607,7 +607,7 @@ test "json with regions" {
     try b.pop_region();
 
     _ = try b.add(add2, c);
-    var func = try b.finish(&.{add2});
+    var func = try b.finish(.{ .returns = &.{add2} });
     func.annotations = &.{.{ .name = "example.function", .value = .{ .boolean = true } }};
 
     var buf: [4096]u8 = undefined;
@@ -633,7 +633,7 @@ test "json with reshape and transpose" {
     const x = try b.param_tensor(.f64, &.{ 2, 3 });
     const t = try b.transpose(x, &.{ 1, 0 });
     const r = try b.reshape(t, &.{6});
-    const func = try b.finish(&.{r});
+    const func = try b.finish(.{ .returns = &.{r} });
 
     var buf: [2048]u8 = undefined;
     var w: Writer = .fixed(&buf);
@@ -660,7 +660,7 @@ test "json with broadcast and literal" {
 
     const one = try b.literal_scalar(.{ .f32 = 1.0 });
     const broadcasted = try b.broadcast_in_dim(one, &.{ 2, 3 }, &.{});
-    const func = try b.finish(&.{broadcasted});
+    const func = try b.finish(.{ .returns = &.{broadcasted} });
 
     var buf: [2048]u8 = undefined;
     var w: Writer = .fixed(&buf);
@@ -690,7 +690,7 @@ test "json output is valid JSON" {
     const prod = try b.mm(a, w);
     const bias_bc = try b.broadcast_in_dim(bias, &.{ 2, 4 }, &.{1});
     const out = try b.add(prod, bias_bc);
-    const func = try b.finish(&.{out});
+    const func = try b.finish(.{ .returns = &.{out} });
 
     var buf: [8192]u8 = undefined;
     var wr: Writer = .fixed(&buf);
@@ -735,7 +735,7 @@ test "every op input yields an edge" {
     const y = try b.param_tensor(.f32, &.{ 2, 2 });
     var acc = try b.add(x, y);
     for (0..8) |_| acc = try b.multiply(acc, y);
-    const func = try b.finish(&.{acc});
+    const func = try b.finish(.{ .returns = &.{acc} });
 
     var expected: usize = 0;
     for (func.ops) |op| expected += op.inputs.len;
@@ -761,7 +761,7 @@ test "a value no op consumes still carries its type" {
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const y = try b.param_tensor(.f32, &.{ 3, 4 });
     const out = try b.mm(x, y);
-    const func = try b.finish(&.{out});
+    const func = try b.finish(.{ .returns = &.{out} });
 
     var buf: [4096]u8 = undefined;
     var w: Writer = .fixed(&buf);
@@ -791,7 +791,7 @@ test "non-finite literals stay parseable" {
     defer b.deinit();
     const neg_inf = try b.literal_scalar(.{ .f32 = -std.math.inf(f32) });
     const out = try b.broadcast_in_dim(neg_inf, &.{ 2, 2 }, &.{});
-    const func = try b.finish(&.{out});
+    const func = try b.finish(.{ .returns = &.{out} });
 
     var buf: [4096]u8 = undefined;
     var w: Writer = .fixed(&buf);
@@ -811,13 +811,13 @@ test emit_program {
     var b1 = try pr.FunctionBuilder.init(&program, "f1");
     defer b1.deinit();
     const x = try b1.param_tensor(.f32, &.{4});
-    const func1 = try b1.finish(&.{x});
+    const func1 = try b1.finish(.{ .returns = &.{x} });
     _ = try program.add_function(func1);
 
     var b2 = try pr.FunctionBuilder.init(&program, "f2");
     defer b2.deinit();
     const y = try b2.param_tensor(.f32, &.{8});
-    const func2 = try b2.finish(&.{y});
+    const func2 = try b2.finish(.{ .returns = &.{y} });
     _ = try program.add_function(func2);
 
     var buf: [4096]u8 = undefined;
@@ -838,7 +838,7 @@ test "emit_program keeps the array schema for one function" {
     var builder = try pr.FunctionBuilder.init(&program, "main");
     defer builder.deinit();
     const x = try builder.param_tensor(.f32, &.{1});
-    _ = try program.add_function(try builder.finish(&.{x}));
+    _ = try program.add_function(try builder.finish(.{ .returns = &.{x} }));
 
     var buf: [2048]u8 = undefined;
     var writer: Writer = .fixed(&buf);
@@ -856,19 +856,19 @@ test "emit_program identifies monotonic call targets" {
     const checkpoint = program.checkpoint_appends();
     var removed = try pr.FunctionBuilder.init(&program, "removed");
     defer removed.deinit();
-    _ = try program.add_function(try removed.finish(&.{}));
+    _ = try program.add_function(try removed.finish(.{ .returns = &.{} }));
     program.restore_appends(checkpoint);
 
     var callee = try pr.FunctionBuilder.init(&program, "callee");
     defer callee.deinit();
     const callee_input = try callee.param_tensor(.f32, &.{});
-    const callee_id = try program.add_function(try callee.finish(&.{callee_input}));
+    const callee_id = try program.add_function(try callee.finish(.{ .returns = &.{callee_input} }));
 
     var caller = try pr.FunctionBuilder.init(&program, "caller");
     defer caller.deinit();
     const caller_input = try caller.param_tensor(.f32, &.{});
     const call_op = try caller.call(callee_id, &.{caller_input});
-    _ = try program.add_function(try caller.finish(call_op.outputs));
+    _ = try program.add_function(try caller.finish(.{ .returns = call_op.outputs }));
 
     var output: Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();

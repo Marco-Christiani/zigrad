@@ -91,7 +91,7 @@ test emit_render {
     const x = try b.param_tensor(.f32, &.{1});
     const y = try b.param_tensor(.f32, &.{1});
     const sum = try b.add(x, y);
-    const func = try b.finish(&.{sum});
+    const func = try b.finish(.{ .returns = &.{sum} });
     _ = try program.add_function(func);
 
     for ([_]RenderFormat{ .zxpr, .json }) |format| {
@@ -115,7 +115,7 @@ test emit_info {
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{1});
     const y = try b.add(x, x);
-    const func = try b.finish(&.{y});
+    const func = try b.finish(.{ .returns = &.{y} });
     _ = try program.add_function(func);
     const header = serialize.Header{
         .magic = serialize.magic[0..serialize.magic.len].*,
