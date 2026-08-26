@@ -3,10 +3,8 @@ const zg = @import("zigrad");
 const build_options = zg.build_options;
 const demos = @import("demos.zig");
 const iree_compile_cmd = @import("iree/compile_cmd.zig");
-const llama_demo = @import("llama_demo.zig");
 const llm_demo = @import("llm_demo.zig");
 const pjrt_aot = @import("demos/pjrt_aot.zig");
-const llama_model = @import("llama_model.zig");
 const cli = @import("cli.zig");
 const log = std.log.scoped(.@"zg/main");
 
@@ -56,10 +54,6 @@ fn tvm_surface_for_command(command: cli.Command) zg.tvm.runtime.Surface {
         },
         .demo => |demo_command| switch (demo_command) {
             .kernel_provider => .compiler,
-            .llama_finetune => |opts| if (opts.kernel_provider) |provider|
-                if (std.mem.eql(u8, provider, "tvm")) .compiler else .ffi
-            else
-                .ffi,
             else => .ffi,
         },
         else => .ffi,
@@ -254,7 +248,6 @@ fn demo_backend(command: cli.DemoCommand) cli.DemoBackend {
         .vjp => |opts| opts.backend,
         .train => |opts| opts.backend,
         .llm_train => |opts| opts.backend,
-        .llama_finetune => |opts| opts.backend,
     };
 }
 
@@ -466,15 +459,6 @@ fn run_portable_demo(
             opts.steps orelse 8,
             quiet,
         ),
-        .llama_finetune => |opts| llama_demo.run_llama_ft_demo(
-            ctx,
-            pipeline,
-            env.environ,
-            opts.warmup,
-            opts.steps,
-            quiet,
-            try llama_config(opts),
-        ),
     };
 }
 
@@ -526,24 +510,6 @@ fn add_mlir_input(
     if (outputs.mlir) |config| {
         try pipeline.add(zg.stablehlo.Dump{ .config = config });
     }
-}
-
-fn llama_config(opts: cli.LlamaFtDemoOpts) !llama_demo.LlamaDemoConfig {
-    const dtype = std.meta.stringToEnum(zg.DType, opts.dtype) orelse
-        return error.InvalidDType;
-    const kernel_provider = if (opts.kernel_provider) |name|
-        std.meta.stringToEnum(llama_demo.LlamaKernelProvider, name) orelse
-            return error.InvalidArgument
-    else
-        null;
-    return .{
-        .train = opts.train,
-        .dtype = dtype,
-        .seq = opts.seq,
-        .batch = opts.batch orelse 1,
-        .execute_only = opts.execute_only,
-        .kernel_provider = kernel_provider,
-    };
 }
 
 fn parse_palette(name: ?[]const u8) !?zg.pr.zxpr.style.Palette {

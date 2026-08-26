@@ -57,6 +57,11 @@
       mainProgram = "mnist";
       profile = zigradBuildConfigurations.xla-iree-cpu;
     };
+    llamaTraining = mkZigExample {
+      name = "llama-training";
+      mainProgram = "llama-training";
+      profile = zigradBuildConfigurations.xla-iree-cuda;
+    };
     cifar10Train = mkZigExample {
       name = "cifar10-lifecycle";
       mainProgram = "cifar10-train";
@@ -226,6 +231,7 @@
         zigrad-example-cifar10-cpu-aarch64 = cifar10CpuAarch64;
         zigrad-example-cifar10-train = cifar10Train;
         zigrad-example-cifar10-tests = cifar10Tests;
+        zigrad-example-llama-training = llamaTraining;
         zigrad-example-mnist = mnist;
         zigrad-example-mlir-cpp = mlirCpp;
         zigrad-example-mlir-cpp-dev = mlirCpp.dev;
@@ -255,6 +261,11 @@
           type = "app";
           program = "${mnist}/bin/mnist";
           meta.description = "Run the Zigrad MNIST training example";
+        };
+        zigrad-example-llama-training = {
+          type = "app";
+          program = "${llamaTraining}/bin/llama-training";
+          meta.description = "Run the Zigrad LLaMA training example";
         };
         zigrad-example-cifar10-cpu = {
           type = "app";

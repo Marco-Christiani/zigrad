@@ -28,7 +28,6 @@ pub const CommandId = enum {
     demo_vjp,
     demo_train,
     demo_llm_train,
-    demo_llama_finetune,
 };
 
 /// Description of one command-line option.
@@ -211,49 +210,6 @@ const train_options = demo_backend_options ++ [_]Option{
     },
 };
 
-const llama_options = demo_backend_options ++ [_]Option{
-    .{
-        .long_name = "warmup",
-        .description = "Set the number of warmup iterations",
-        .value_name = "COUNT",
-    },
-    .{
-        .long_name = "steps",
-        .description = "Set the number of measured training steps",
-        .value_name = "COUNT",
-    },
-    .{
-        .long_name = "train",
-        .description = "Enable training instead of inference",
-        .negatable = true,
-    },
-    .{
-        .long_name = "dtype",
-        .description = "Select the model element type",
-        .value_name = "TYPE",
-    },
-    .{
-        .long_name = "seq",
-        .description = "Set the sequence length",
-        .value_name = "COUNT",
-    },
-    .{
-        .long_name = "batch",
-        .description = "Set the batch size",
-        .value_name = "COUNT",
-    },
-    .{
-        .long_name = "execute-only",
-        .description = "Load and execute an existing artifact without compilation",
-        .negatable = true,
-    },
-    .{
-        .long_name = "kernel-provider",
-        .description = "Select a kernel provider",
-        .value_name = "NAME",
-    },
-};
-
 const path_argument = [_]Positional{.{
     .name = "PATH",
     .description = "Artifact path",
@@ -408,13 +364,6 @@ const demo_children = [_]Command{
         .name = "llm-train",
         .summary = "Run the small LLM training demo",
         .options = &train_options,
-        .requirement = "MLIR plus PJRT or IREE",
-    },
-    .{
-        .id = .demo_llama_finetune,
-        .name = "llama-finetune",
-        .summary = "Run the small Llama fine-tune demo",
-        .options = &llama_options,
         .requirement = "MLIR plus PJRT or IREE",
     },
 };

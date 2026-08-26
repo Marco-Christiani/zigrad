@@ -1,49 +1,32 @@
+//! LLaMA 3.2 model expressed with Zigrad tensors.
+
 const std = @import("std");
 const zg = @import("zigrad");
 const Tensor = zg.Tensor;
 
-/// A single loadable weight tensor. Field name `weight` to match the
-///  checkpoint's convention so paths produced by walking the containing
-///  struct are byte-identical to checkpoint keys. This is required
-///  for convenient loading which uses recursive comptime analysis
-///  of the struct.
+/// A checkpoint field containing one weight tensor.
 ///
-/// Named so future per-tensor metadata (lifetime, quantization mode,
-///  sharding hint, etc.) a place.
-pub const Weight = struct {
+/// The `weight` field preserves the final component of each SafeTensors key.
+const Weight = struct {
     weight: Tensor,
 };
 
-/// LLaMA weights laid out to mirror the checkpoint hierarchy exactly.
-/// Every field path is byte-identical to a safetensors key.
+/// Return LLaMA weights whose field paths match the checkpoint hierarchy.
 ///
-/// Weights are stored in torch's `[out, in]` row-major orientation.
-///  `LlamaModel.forward` uses `dot_general` with appropriate contracting
-///  dims so the loader does not have to transpose. QKV is thus not
-///  explicitly fused out our op graph, `forward` emits separate matmuls
-///  (backends will fuse them, eg XLA fuses this).
+/// Weights use PyTorch's `[out, in]` orientation. Linear projections express
+///  that layout through their contracting dimensions.
 ///
-/// The output projection is tied by construction: `forward` uses
-///  `model.embed_tokens.weight` directly as the `lm_head` weight, so there
-///  is a single parameter used in two places. AD naturally sums the two
-///  contributions into one gradient, one optim update, one device buffer.
-///  No `lm_head` field.
+/// The embedding matrix also supplies the output projection, so AD accumulates
+///  both contributions into one parameter cotangent.
 ///
-/// `LlamaWeights` is a thin shell that exists only to produce the `model.`
-///  prefix in safetensors keys.
-///  Call into the model via `params.model.forward(...)`.
-///
-/// TODO: Supporting a non-tied LLaMA (e.g. 3.1-8B with a dedicated
-///  `lm_head.weight`) is a later task. This would require either a
-///  second model type or optional-in-spec handling through trace.
-///  Will add it when a non-tied checkpoint comes up.
+/// TODO(model): Represent checkpoints with an independent `lm_head.weight`.
 pub fn LlamaWeights(comptime num_layers: usize) type {
     return struct {
         model: LlamaModel(num_layers),
     };
 }
 
-pub fn LlamaModel(comptime num_layers: usize) type {
+fn LlamaModel(comptime num_layers: usize) type {
     return struct {
         const Self = @This();
 
@@ -59,23 +42,20 @@ pub fn LlamaModel(comptime num_layers: usize) type {
             sin: Tensor,
             cos: Tensor,
             eps: f32,
-            opts: ForwardOptions,
         ) !Tensor {
             std.debug.assert(tokens.dims().len == 2);
             const batch_size = tokens.dims()[0];
             const seq = tokens.dims()[1];
 
-            // build predicates once and reuse across layers
+            // build the shared predicates once
             const zero_mask = try Tensor.constant_like(mask, 0.0);
             const causal_pred = try mask.compare(zero_mask, .{ .direction = .GT, .compare_type = .FLOAT });
             const zero_attn_b = try Tensor.constant_like(attention_mask, 0.0);
             const attn_pred = try attention_mask.compare(zero_attn_b, .{ .direction = .GT, .compare_type = .FLOAT });
 
             var x = try self.embed(tokens);
-            // `inline for` gives us a comptime `layer_idx`, which threads through
-            //  to `linear` as `comptimePrint` args for the sake of region names
-            inline for (self.layers, 0..) |layer, layer_idx| {
-                x = try layer.forward(x, causal_pred, attn_pred, sin, cos, layer_idx, eps, opts);
+            inline for (self.layers) |layer| {
+                x = try layer.forward(x, causal_pred, attn_pred, sin, cos, eps);
             }
             return try self.output_head(x, batch_size, seq, eps);
         }
@@ -109,10 +89,8 @@ pub fn LlamaModel(comptime num_layers: usize) type {
 
         /// Final RMS norm and output projection.
         ///
-        /// Assumes tied weights, trace sees a single parameter used here and in `embed`,
-        ///  so AD emits one combined gradient. Torch layout is `[vocab, hidden]`, we
-        ///  contract the last dim of both operands to produce `[B*S, vocab]`, then
-        ///  reshape to `[B, S, vocab]`.
+        /// The tied embedding matrix has `[vocab, hidden]` layout. Contracting
+        ///  both hidden dimensions produces `[B*S, vocab]`.
         fn output_head(self: Self, x: Tensor, batch_size: i64, seq: i64, eps: f32) !Tensor {
             const embed_tokens = self.embed_tokens.weight;
             const vocab = embed_tokens.dims()[0];
@@ -133,48 +111,44 @@ pub fn LlamaModel(comptime num_layers: usize) type {
     };
 }
 
-pub const LlamaLayer = struct {
+const LlamaLayer = struct {
     self_attn: SelfAttention,
     mlp: MLP,
     input_layernorm: Weight,
     post_attention_layernorm: Weight,
 
-    pub fn forward(
+    fn forward(
         self: LlamaLayer,
         x_in: Tensor,
         causal_pred: Tensor,
         attn_pred: Tensor,
         sin: Tensor,
         cos: Tensor,
-        comptime layer_idx: usize,
         eps: f32,
-        opts: ForwardOptions,
     ) !Tensor {
         const x_norm = try rms_norm(x_in, self.input_layernorm.weight, eps);
-        const attn_out = try self.self_attn.forward(x_norm, causal_pred, attn_pred, sin, cos, layer_idx, opts);
+        const attn_out = try self.self_attn.forward(x_norm, causal_pred, attn_pred, sin, cos);
         const x1 = try x_in.add(attn_out);
 
         const post_norm = try rms_norm(x1, self.post_attention_layernorm.weight, eps);
-        const mlp_out = try self.mlp.forward(post_norm, layer_idx, opts);
+        const mlp_out = try self.mlp.forward(post_norm);
         return try x1.add(mlp_out);
     }
 };
 
-pub const SelfAttention = struct {
+const SelfAttention = struct {
     q_proj: Weight,
     k_proj: Weight,
     v_proj: Weight,
     o_proj: Weight,
 
-    pub fn forward(
+    fn forward(
         self: SelfAttention,
         x: Tensor,
         causal_pred: Tensor,
         attn_pred: Tensor,
         sin: Tensor,
         cos: Tensor,
-        comptime layer_idx: usize,
-        opts: ForwardOptions,
     ) !Tensor {
         const q_proj = self.q_proj.weight;
         const k_proj = self.k_proj.weight;
@@ -213,12 +187,9 @@ pub const SelfAttention = struct {
         const x_dot = try x.convert(q_proj.dtype);
         const x_flat = try x_dot.reshape(&.{ batch_size * seq, hidden });
 
-        // three separate linear projections (XLA fuses these), we do not pre-fuse in the IR
-        //  we would have to tranpose the weights. Since that added a lot of extra ceremony
-        //  before, just going to stick with this since we expect the backend to fuse it.
-        const q_flat = try linear(x_flat, q_proj, opts.kernelize_provider, "llama_l{d}_attn_q", .{layer_idx});
-        const k_flat = try linear(x_flat, k_proj, opts.kernelize_provider, "llama_l{d}_attn_k", .{layer_idx});
-        const v_flat = try linear(x_flat, v_proj, opts.kernelize_provider, "llama_l{d}_attn_v", .{layer_idx});
+        const q_flat = try linear(x_flat, q_proj);
+        const k_flat = try linear(x_flat, k_proj);
+        const v_flat = try linear(x_flat, v_proj);
 
         const q = try q_flat.reshape(&.{ batch_size, seq, n_heads, head_dim });
         const k = try k_flat.reshape(&.{ batch_size, seq, n_kv, head_dim });
@@ -265,26 +236,20 @@ pub const SelfAttention = struct {
 
         const out_dot = try out_bshd.convert(o_proj.dtype);
         const out_flat = try out_dot.reshape(&.{ batch_size * seq, hidden });
-        const proj_flat = try linear(out_flat, o_proj, opts.kernelize_provider, "llama_l{d}_attn_o", .{layer_idx});
+        const proj_flat = try linear(out_flat, o_proj);
         return try proj_flat.reshape(&.{ batch_size, seq, hidden });
     }
 };
 
-pub const MLP = struct {
+const MLP = struct {
     gate_proj: Weight,
     up_proj: Weight,
     down_proj: Weight,
 
-    pub fn forward(
-        self: MLP,
-        x: Tensor,
-        comptime layer_idx: usize,
-        opts: ForwardOptions,
-    ) !Tensor {
+    fn forward(self: MLP, x: Tensor) !Tensor {
         const gate_proj = self.gate_proj.weight;
         const up_proj = self.up_proj.weight;
         const down_proj = self.down_proj.weight;
-        const provider = opts.kernelize_provider;
 
         if (x.dims().len == 3) {
             const batch_size = x.dims()[0];
@@ -292,26 +257,22 @@ pub const MLP = struct {
             const hidden = x.dims()[2];
             const x_dot = try x.convert(gate_proj.dtype);
             const x_flat = try x_dot.reshape(&.{ batch_size * seq, hidden });
-            const gate = try linear(x_flat, gate_proj, provider, "llama_l{d}_mlp_gate", .{layer_idx});
-            const up = try linear(x_flat, up_proj, provider, "llama_l{d}_mlp_up", .{layer_idx});
+            const gate = try linear(x_flat, gate_proj);
+            const up = try linear(x_flat, up_proj);
             const act = try silu_like(gate);
             const fused = try act.mul(up);
             const fused_dot = try fused.convert(down_proj.dtype);
-            const down_flat = try linear(fused_dot, down_proj, provider, "llama_l{d}_mlp_down", .{layer_idx});
+            const down_flat = try linear(fused_dot, down_proj);
             return try down_flat.reshape(&.{ batch_size, seq, hidden });
         }
 
         std.debug.assert(x.dims().len == 2);
-        const gate = try linear(x, gate_proj, provider, "llama_l{d}_mlp_gate", .{layer_idx});
-        const up = try linear(x, up_proj, provider, "llama_l{d}_mlp_up", .{layer_idx});
+        const gate = try linear(x, gate_proj);
+        const up = try linear(x, up_proj);
         const act = try silu_like(gate);
         const fused = try act.mul(up);
-        return try linear(fused, down_proj, provider, "llama_l{d}_mlp_down", .{layer_idx});
+        return try linear(fused, down_proj);
     }
-};
-
-pub const ForwardOptions = struct {
-    kernelize_provider: ?[]const u8 = null,
 };
 
 /// Apply rotary position embeddings using split-half layout (LLaMA 3 convention).
@@ -395,7 +356,7 @@ fn softmax_last_dim(x: Tensor) !Tensor {
     return try exp.div(sum_b);
 }
 
-// TODO: clean this up, actually a lot of this code needs clean up and reveals some gaps in the UX (tensor api surface)
+// TODO(api): Add a tensor softmax operation with an accumulation dtype.
 fn softmax_last_dim_accum_f32(x: Tensor) !Tensor {
     // Only bf16 needs the f32 accumulation round-trip, everything else
     //  computes softmax in its native dtype.
@@ -406,51 +367,22 @@ fn softmax_last_dim_accum_f32(x: Tensor) !Tensor {
     return try y_f32.convert(.bf16);
 }
 
-/// Linear projection with torch weight layout (`[out, in]`).
-///
-/// Contracts the last dim of `x` with dim 1 of `w` via `dot_general`,
-///  producing `[*, out]`.
-///
-/// No explicit transpose, `dot_general`'s contracting dims are
-///  first-class, so this is just `{.lhs_contracting = 1, .rhs_contracting = 1}`.
-///  Physical layout selection is the backend's job. A `[in, out]`
-///  (flax-style) variant would be the same call with `rhs_contracting = 0`.
-///
-/// When `kernelize_provider` is set, the op is wrapped in a region named
-///  by `comptimePrint(region_name_fmt, fmt_args)`. The region name is
-///  resolved at compile time.
-fn linear(
-    x: Tensor,
-    w: Tensor,
-    kernelize_provider: ?[]const u8,
-    comptime region_name_fmt: []const u8,
-    comptime fmt_args: anytype,
-) !Tensor {
-    const params: zg.pr.DotGeneralParams = .{
+/// Apply a linear projection whose weight uses `[out, in]` layout.
+fn linear(x: Tensor, w: Tensor) !Tensor {
+    return try x.dot_general(w, .{
         .lhs_batch_dims = &.{},
         .rhs_batch_dims = &.{},
         .lhs_contracting_dims = &.{1},
         .rhs_contracting_dims = &.{1},
-    };
-    if (kernelize_provider) |provider_name| {
-        const region_name = comptime std.fmt.comptimePrint(region_name_fmt, fmt_args);
-        try x.backing.traced.builder.push_region(
-            region_name,
-            &.{zg.kernel.provider_annotation(provider_name)},
-        );
-        defer x.backing.traced.builder.pop_region() catch @panic("OOM");
-        return try x.dot_general(w, params);
-    }
-    return try x.dot_general(w, params);
+    });
 }
 
-// TODO: this is hard to look at, really needs polish after we bring tensor API along.
+// TODO(api): Add a tensor SiLU operation with an accumulation dtype.
 fn silu_like(x: Tensor) !Tensor {
     // silu(x) = x / (1 + exp(-x))
-    // For bf16, compute exp in the model dtype and accumulate the rest in f32,
-    //  this matches jax's bf16 lowering which we check against.
+    // For bf16, compute exp in the model dtype and accumulate the rest in f32
     if (x.dtype != .bf16 and x.dtype != .f32) {
-        // fallback to existing logistic lowering for other dtypes
+        // use the direct logistic lowering for other dtypes
         return try x.mul(try x.logistic());
     }
 
@@ -473,8 +405,7 @@ fn silu_like(x: Tensor) !Tensor {
     return try y_f32.convert(orig_dtype);
 }
 
-// TODO: see above comment
-pub fn rms_norm(x: Tensor, weight: Tensor, eps: f32) !Tensor {
+fn rms_norm(x: Tensor, weight: Tensor, eps: f32) !Tensor {
     if (x.dims().len == 3) {
         const h = x.dims()[2];
         const orig_dtype = x.dtype;

@@ -332,6 +332,14 @@
       description = "Zigrad with interchangeable XLA and IREE CPU execution paths";
     };
 
+    xla-iree-cuda = {
+      demands = [
+        "iree-cuda-execution"
+        "xla-cuda-execution"
+      ];
+      description = "Zigrad with interchangeable XLA and IREE CUDA execution paths";
+    };
+
     tvm-cpu = {
       demands = ["tvm-cpu"];
       description = "Zigrad with standalone TVM CPU tuning and execution";

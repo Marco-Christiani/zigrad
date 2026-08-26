@@ -157,7 +157,7 @@ fn run_pjrt(
         .device = execution.interface.device,
     };
     var backend = zg.pjrt.Backend.init(&execution, .{});
-    return try run_training(allocator, steps, .{ .pjrt = &backend }, &ctx);
+    return try run_training(allocator, steps, &backend.interface, &ctx);
 }
 
 fn run_iree(
@@ -176,18 +176,13 @@ fn run_iree(
         .io = io,
         .device = execution.interface.device,
     };
-    return try run_training(allocator, steps, .{ .iree = &backend }, &ctx);
+    return try run_training(allocator, steps, &backend.interface, &ctx);
 }
-
-const TrainingBackend = union(enum) {
-    pjrt: *zg.pjrt.Backend,
-    iree: *zg.iree.Backend,
-};
 
 fn run_training(
     allocator: std.mem.Allocator,
     steps: usize,
-    backend: TrainingBackend,
+    backend: *zg.Backend(zg.stablehlo.Artifact),
     ctx: *zg.CompilationCtx,
 ) !void {
     std.log.info("compiling train_step...", .{});
@@ -199,11 +194,10 @@ fn run_training(
     );
     defer traced.deinit();
 
-    var pipeline = switch (backend) {
-        .pjrt => |selected| try zg.pjrt.pipeline.create(allocator, selected, .{}),
-        .iree => |selected| try zg.iree.pipeline.create(allocator, .{ .loaded = selected }, .{}),
-    };
+    var pipeline = zg.Pipeline.init(allocator);
     defer pipeline.deinit();
+    try zg.mlir.stablehlo.pipeline.add(&pipeline, .{});
+    try pipeline.add(backend);
 
     var loaded_program = try pipeline.run(
         zg.Executor.LoadedProgram,

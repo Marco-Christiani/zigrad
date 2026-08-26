@@ -83,28 +83,6 @@ pub const TrainDemoOpts = struct {
     steps: ?u32 = null,
 };
 
-/// Options for `demo llama-finetune`.
-pub const LlamaFtDemoOpts = struct {
-    /// Terminal backend used to compile and execute the scenario.
-    backend: DemoBackend = .pjrt,
-    /// Number of warmup iterations.
-    warmup: u32 = 5,
-    /// Number of measured training steps.
-    steps: u32 = 20,
-    /// Enable training instead of inference.
-    train: bool = true,
-    /// Element type used by the demo.
-    dtype: []const u8 = "bf16",
-    /// Sequence length.
-    seq: u32 = 4,
-    /// Batch size.
-    batch: ?u32 = null,
-    /// Load and execute an existing artifact without compilation.
-    execute_only: bool = false,
-    /// Optional kernel provider name.
-    kernel_provider: ?[]const u8 = null,
-};
-
 /// Options for `iree compile`.
 pub const IreeCompileOpts = struct {
     /// Serialized PR file to compile.
@@ -187,7 +165,6 @@ pub const DemoCommand = union(enum) {
     vjp: DemoOpts,
     train: TrainDemoOpts,
     llm_train: TrainDemoOpts,
-    llama_finetune: LlamaFtDemoOpts,
 };
 
 /// Root command groups.
@@ -425,7 +402,6 @@ fn parse_demo(cursor: *Cursor) !DemoCommand {
         .demo_vjp => .{ .vjp = try parse_default_options(DemoOpts, .demo_vjp, cursor) },
         .demo_train => .{ .train = try parse_default_options(TrainDemoOpts, .demo_train, cursor) },
         .demo_llm_train => .{ .llm_train = try parse_default_options(TrainDemoOpts, .demo_llm_train, cursor) },
-        .demo_llama_finetune => .{ .llama_finetune = try parse_default_options(LlamaFtDemoOpts, .demo_llama_finetune, cursor) },
         else => unreachable,
     };
 }
@@ -799,26 +775,6 @@ test "parse_tokens parses nested artifact commands" {
             },
             else => return error.TestExpectedEqual,
         }
-    }
-}
-
-test "parse_tokens supports boolean negation" {
-    const args = [_][]const u8{
-        "demo",
-        "llama-finetune",
-        "--no-train",
-        "--execute-only",
-    };
-    const invocation = try parse_tokens(&args);
-    switch (invocation.command) {
-        .demo => |demo| switch (demo) {
-            .llama_finetune => |opts| {
-                try std.testing.expect(!opts.train);
-                try std.testing.expect(opts.execute_only);
-            },
-            else => return error.TestExpectedEqual,
-        },
-        else => return error.TestExpectedEqual,
     }
 }
 

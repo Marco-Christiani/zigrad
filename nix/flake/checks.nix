@@ -16,6 +16,7 @@
     cifar10Tests = config.packages.zigrad-example-cifar10-tests;
     hasBasicDeploymentCuda = config.packages ? zigrad-example-basic-deployment-cuda;
     basicDeploymentCuda = config.packages.zigrad-example-basic-deployment-cuda or null;
+    llamaTraining = config.packages.zigrad-example-llama-training;
     mnistExample = config.packages.zigrad-example-mnist;
     mlirCppExample = config.packages.zigrad-example-mlir-cpp;
 
@@ -137,6 +138,7 @@
         zigrad-example-basic-deployment-cpu = basicDeploymentCpu;
         zigrad-example-cifar10-cpu = cifar10Cpu;
         zigrad-example-cifar10-tests = cifar10Tests;
+        zigrad-example-llama-training = llamaTraining;
         zigrad-example-mlir-cpp = mlirCppExample;
         zigrad-example-mnist-pjrt = checkMnistPjrtExample;
         zigrad-example-mnist-iree = checkMnistIreeExample;

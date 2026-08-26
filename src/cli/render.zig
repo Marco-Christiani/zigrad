@@ -615,8 +615,8 @@ test "help and metadata render from the command schema" {
     var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
 
-    const command = schema.find_by_id(.demo_llama_finetune).?;
+    const command = schema.find_by_id(.demo_train).?;
     try write_help(&output.writer, command);
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "zigrad demo llama-finetune") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "--[no-]train") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "zigrad demo train") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "--steps") != null);
 }
