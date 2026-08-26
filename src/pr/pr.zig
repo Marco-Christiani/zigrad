@@ -374,6 +374,7 @@ pub const FunctionId = enum(u32) { _ };
 /// Failures from registering a function with a program.
 pub const FunctionRegistrationError = Allocator.Error || error{
     DuplicateFunctionName,
+    DuplicateFunctionId,
     FunctionIdExhausted,
 };
 
@@ -752,6 +753,7 @@ pub const Program = struct {
     arena: std.heap.ArenaAllocator,
     function_entries: std.MultiArrayList(FunctionEntry),
     function_index_by_id: std.AutoHashMapUnmanaged(FunctionId, usize),
+    assigned_function_ids: std.AutoHashMapUnmanaged(FunctionId, void),
     function_id_by_name: std.StringHashMapUnmanaged(FunctionId),
     next_function_id: u64,
     reserved_function_names: std.ArrayList([]const u8),
@@ -778,6 +780,7 @@ pub const Program = struct {
             .arena = std.heap.ArenaAllocator.init(backing_allocator),
             .function_entries = .empty,
             .function_index_by_id = .empty,
+            .assigned_function_ids = .empty,
             .function_id_by_name = .empty,
             .next_function_id = 0,
             .reserved_function_names = .empty,
@@ -789,17 +792,30 @@ pub const Program = struct {
         return self.arena.allocator();
     }
 
-    /// Append a function whose name is not already present and return its
-    ///  program identity.
+    /// Register a function under the next program-local identity.
     pub fn add_function(
         self: *Program,
+        /// Function whose referenced storage remains valid for the program lifetime.
         func: Function,
     ) FunctionRegistrationError!FunctionId {
-        if (self.function_id_by_name.contains(func.name)) return error.DuplicateFunctionName;
+        const id: FunctionId = @enumFromInt(std.math.cast(u32, self.next_function_id) orelse
+            return error.FunctionIdExhausted);
+        return try self.add_function_with_id(func, id);
+    }
 
-        const raw_id = std.math.cast(u32, self.next_function_id) orelse
-            return error.FunctionIdExhausted;
-        const id: FunctionId = @enumFromInt(raw_id);
+    /// Register a function under an unused program-local identity.
+    ///
+    /// The next allocated identity advances past `id`. This preserves source
+    ///  identities when reconstructing or projecting a program.
+    pub fn add_function_with_id(
+        self: *Program,
+        /// Function whose referenced storage remains valid for the program lifetime.
+        func: Function,
+        /// Identity to assign to `func`.
+        id: FunctionId,
+    ) FunctionRegistrationError!FunctionId {
+        if (self.function_id_by_name.contains(func.name)) return error.DuplicateFunctionName;
+        if (self.assigned_function_ids.contains(id)) return error.DuplicateFunctionId;
         const index = self.function_entries.len;
         const arena = self.allocator();
 
@@ -808,8 +824,10 @@ pub const Program = struct {
         try self.function_index_by_id.put(arena, id, index);
         errdefer std.debug.assert(self.function_index_by_id.remove(id));
         try self.function_id_by_name.put(arena, func.name, id);
+        errdefer std.debug.assert(self.function_id_by_name.remove(func.name));
+        try self.assigned_function_ids.put(arena, id, {});
 
-        self.next_function_id += 1;
+        self.next_function_id = @max(self.next_function_id, @as(u64, @intFromEnum(id)) + 1);
         return id;
     }
 
@@ -1132,6 +1150,7 @@ pub fn validate_program(program: *const Program) ValidationError!void {
     for (program.functions(), program.function_ids(), 0..) |func, id, i| {
         if (program.get_function_id(func.name) != id or
             program.function_index_by_id.get(id) != i or
+            !program.assigned_function_ids.contains(id) or
             program.next_function_id <= @intFromEnum(id))
             return error.FunctionIdentityMismatch;
         try validate_function(func);
@@ -1758,6 +1777,39 @@ test "Program.add_function rejects duplicate names" {
     try std.testing.expectError(error.DuplicateFunctionName, program.add_function(function));
 }
 
+test "Program.add_function_with_id preserves explicit identities" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    const first = Function{
+        .name = "first",
+        .params = &.{},
+        .returns = &.{},
+        .ops = &.{},
+        .regions = &.{},
+        .var_count = 0,
+    };
+    const second = Function{
+        .name = "second",
+        .params = &.{},
+        .returns = &.{},
+        .ops = &.{},
+        .regions = &.{},
+        .var_count = 0,
+    };
+
+    const explicit: FunctionId = @enumFromInt(7);
+    try std.testing.expectEqual(explicit, try program.add_function_with_id(first, explicit));
+    try std.testing.expectError(
+        error.DuplicateFunctionId,
+        program.add_function_with_id(second, explicit),
+    );
+    try std.testing.expectEqual(
+        @as(FunctionId, @enumFromInt(8)),
+        try program.add_function(second),
+    );
+}
+
 test "Program.reserve_unique_function_name increments occupied names" {
     var program = Program.init(std.testing.allocator);
     defer program.deinit();
@@ -1797,6 +1849,17 @@ test "Program.restore discards appended functions and reservations" {
     try std.testing.expect(program.get_function_id("first") != null);
     try std.testing.expect(program.get_function_id("second") == null);
     try std.testing.expect(program.get_function_by_id(@enumFromInt(1)) == null);
+    try std.testing.expectError(
+        error.DuplicateFunctionId,
+        program.add_function_with_id(.{
+            .name = "replacement",
+            .params = &.{},
+            .returns = &.{},
+            .ops = &.{},
+            .regions = &.{},
+            .var_count = 0,
+        }, second_id),
+    );
 
     var third = try FunctionBuilder.init(&program, "third");
     defer third.deinit();

@@ -4,12 +4,11 @@
 //!  and reconstructs derived def-use links while parsing.
 //!
 //! `emit` and `parse` cover whole programs. Public codec primitives expose the
-//!  reflected encoding for individual fragments. Fragment call references retain
-//!  their program-local identities. Whole-program call references use
-//!  function-table ordinals.
+//!  reflected encoding for individual fragments. Function definitions, calls,
+//!  and entry selection retain their program-local identities.
 //!
-//! `schema_hash` identifies the reflected types and fixed outer layout for
-//!  stored fragments.
+//! Separate schema hashes identify whole programs, value fragments, and
+//!  operation fragments.
 
 const std = @import("std");
 const pr = @import("pr.zig");
@@ -20,7 +19,7 @@ const Writer = std.Io.Writer;
 /// Eight-byte marker at the start of every PR wire document.
 pub const magic = "ZGPRWIRE";
 /// Current PR wire format version.
-pub const version: u32 = 8;
+pub const version: u32 = 9;
 const header_size = magic.len + @sizeOf(u32) + @sizeOf(u64);
 
 // This count forces a wire-version decision when `Prim` or `Params` changes.
@@ -37,8 +36,12 @@ comptime {
     }
 }
 
-/// Fingerprint of the reflected Params schema and the fixed outer layout.
-pub const schema_hash = compute_schema_hash();
+/// Fingerprint of the complete PR wire layout.
+pub const schema_hash = compute_program_schema_hash();
+/// Fingerprint of a value fragment encoded as dtype followed by dimensions.
+pub const value_schema_hash = compute_value_schema_hash();
+/// Fingerprint of an operation fragment encoded as id followed by parameters.
+pub const operation_schema_hash = compute_operation_schema_hash();
 
 /// Errors produced while emitting a PR wire document.
 pub const EmitError = Writer.Error || error{
@@ -59,7 +62,6 @@ const DecodeError = Allocator.Error || error{
     DuplicateOpId,
     UnknownOpId,
     VarCountMismatch,
-    EntryOrdinalOutOfRange,
 };
 
 /// Errors produced while parsing or validating a PR wire document.
@@ -76,13 +78,12 @@ pub fn emit(program: *const pr.Program, writer: *Writer) EmitError!void {
     try writer.writeInt(u32, version, .little);
     try writer.writeInt(u64, schema_hash, .little);
     try write_length(writer, program.functions().len);
-    const entry_ordinal = if (program.entry) |entry|
-        function_ordinal(program, entry) orelse return error.UnknownFunctionId
-    else
-        null;
-    try write_value(?u32, writer, entry_ordinal);
+    if (program.entry) |entry|
+        if (program.get_function_by_id(entry) == null) return error.UnknownFunctionId;
+    try write_value(?pr.FunctionId, writer, program.entry);
 
-    for (program.functions()) |func| {
+    for (program.functions(), program.function_ids()) |func, id| {
+        try write_value(pr.FunctionId, writer, id);
         try write_value([]const u8, writer, func.name);
         try write_value([]const pr.Annotation, writer, func.annotations);
         try writer.writeInt(u32, func.var_count, .little);
@@ -119,22 +120,9 @@ pub fn emit(program: *const pr.Program, writer: *Writer) EmitError!void {
 }
 
 fn write_program_params(program: *const pr.Program, writer: *Writer, params: pr.Params) EmitError!void {
-    switch (params) {
-        .call => |call| {
-            try write_enum(pr.Prim, writer, .call);
-            const ordinal = function_ordinal(program, call.callee) orelse
-                return error.UnknownFunctionId;
-            try writer.writeInt(u32, ordinal, .little);
-        },
-        else => try write_value(pr.Params, writer, params),
-    }
-}
-
-fn function_ordinal(program: *const pr.Program, id: pr.FunctionId) ?u32 {
-    for (program.function_ids(), 0..) |function_id, index| {
-        if (function_id == id) return @intCast(index);
-    }
-    return null;
+    if (params == .call and program.get_function_by_id(params.call.callee) == null)
+        return error.UnknownFunctionId;
+    try write_value(pr.Params, writer, params);
 }
 
 /// Fixed fields at the start of a PR wire payload.
@@ -189,19 +177,17 @@ pub fn parse(backing_allocator: Allocator, bytes: []const u8) ParseError!pr.Prog
     const arena = program.allocator();
 
     const function_count = try reader.read_length();
-    const entry_ordinal = try read_value(?u32, &reader, arena);
-    if (entry_ordinal) |ordinal| {
-        if (ordinal >= function_count) return error.EntryOrdinalOutOfRange;
-    }
+    const entry = try read_value(?pr.FunctionId, &reader, arena);
     const functions = try arena.alloc(pr.Function, function_count);
-    for (functions) |*func| func.* = try read_function(&reader, arena);
-    for (functions, 0..) |func, ordinal| {
-        const id = try program.add_function(func);
-        std.debug.assert(@intFromEnum(id) == ordinal);
+    const function_ids = try arena.alloc(pr.FunctionId, function_count);
+    for (functions, function_ids) |*func, *id| {
+        id.* = try read_value(pr.FunctionId, &reader, arena);
+        func.* = try read_function(&reader, arena);
     }
-    if (entry_ordinal) |ordinal| {
-        program.set_entry(@enumFromInt(ordinal)) catch unreachable;
-    }
+    for (functions, function_ids) |func, id|
+        _ = try program.add_function_with_id(func, id);
+    if (entry) |id|
+        program.set_entry(id) catch return error.EntryFunctionMissing;
 
     if (reader.pos != bytes.len) return error.TrailingData;
     try pr.validate_program(&program);
@@ -493,15 +479,32 @@ pub const Reader = struct {
     }
 };
 
-fn compute_schema_hash() u64 {
+fn compute_program_schema_hash() u64 {
     @setEvalBranchQuota(100_000);
     var hash: u64 = 14695981039346656037;
-    hash_bytes(&hash, "Program:function_count,?entry_ordinal,[Function];Function:name,[Annotation],var_count,[param],[Op],[Region],[return];" ++
+    hash_bytes(&hash, "Program:function_count,?entry_id,[Function:id,name,[Annotation],var_count,[param],[Op],[Region],[return]];" ++
         "param:id,dtype,dims;Op:id,[input id],[output],Params;" ++
         "Region:id,name,[Annotation],[op id];output:id,dtype,dims");
     hash_type(&hash, pr.DType);
     hash_type(&hash, pr.Params);
     hash_type(&hash, pr.Annotation);
+    return hash;
+}
+
+fn compute_value_schema_hash() u64 {
+    var hash: u64 = 14695981039346656037;
+    hash_bytes(&hash, "value:dtype,dims");
+    hash_type(&hash, pr.DType);
+    hash_type(&hash, []const i64);
+    return hash;
+}
+
+fn compute_operation_schema_hash() u64 {
+    @setEvalBranchQuota(100_000);
+    var hash: u64 = 14695981039346656037;
+    hash_bytes(&hash, "operation:id,Params");
+    hash_type(&hash, u32);
+    hash_type(&hash, pr.Params);
     return hash;
 }
 
@@ -533,6 +536,7 @@ fn hash_type(hash: *u64, comptime T: type) void {
         },
         .@"enum" => |info| {
             hash_bytes(hash, "enum");
+            hash_type(hash, info.tag_type);
             inline for (info.fields) |field| {
                 hash_bytes(hash, field.name);
                 hash_int(hash, field.value);
@@ -799,7 +803,7 @@ test "binary PR preserves inferred entry selection" {
     try std.testing.expectEqual(@as(pr.FunctionId, @enumFromInt(0)), try parsed.resolve_entry());
 }
 
-test "binary PR translates monotonic function identities to wire ordinals" {
+test "binary PR preserves sparse function identities" {
     var source = pr.Program.init(std.testing.allocator);
     defer source.deinit();
 
@@ -825,7 +829,8 @@ test "binary PR translates monotonic function identities to wire ordinals" {
     defer caller_builder.deinit();
     const caller_input = try caller_builder.param_tensor(.f32, &.{});
     const call_op = try caller_builder.call(callee_id, &.{caller_input});
-    _ = try source.add_function(try caller_builder.finish(.{ .returns = call_op.outputs }));
+    const caller_id = try source.add_function(try caller_builder.finish(.{ .returns = call_op.outputs }));
+    try source.set_entry(caller_id);
 
     var encoded: Writer.Allocating = .init(std.testing.allocator);
     defer encoded.deinit();
@@ -835,10 +840,10 @@ test "binary PR translates monotonic function identities to wire ordinals" {
     defer parsed.deinit();
     const function_ids = parsed.function_ids();
     try std.testing.expectEqual(@as(usize, 3), function_ids.len);
-    const parsed_callee_id = function_ids[1];
-    const parsed_caller_id = function_ids[2];
-    const parsed_caller = parsed.get_function_by_id(parsed_caller_id).?;
-    try std.testing.expectEqual(parsed_callee_id, parsed_caller.ops[0].params.call.callee);
+    try std.testing.expectEqualSlices(pr.FunctionId, &.{ @enumFromInt(0), @enumFromInt(2), @enumFromInt(3) }, function_ids);
+    try std.testing.expectEqual(@as(?pr.FunctionId, @enumFromInt(3)), parsed.entry);
+    const parsed_caller = parsed.get_function_by_id(@enumFromInt(3)).?;
+    try std.testing.expectEqual(@as(pr.FunctionId, @enumFromInt(2)), parsed_caller.ops[0].params.call.callee);
 }
 
 test "convolution parameters round trip" {
