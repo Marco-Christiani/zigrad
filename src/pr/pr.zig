@@ -948,11 +948,26 @@ pub const Program = struct {
     }
 };
 
-/// Errors from post-construction validation (op registry checks, call
-///  signature matching, duplicate function names).
+/// Errors from function and program validation.
+///
+/// This includes SSA structure, operation invariants, call signatures, and
+///  program-level identity checks.
 /// Each op type has its own `*TypeMismatch` variant for targeted diagnostics.
 pub const ValidationError = error{
-    InvalidVar,
+    /// A function parameter names an operation as its definition.
+    ParameterHasDefiningOp,
+    /// One variable occupies more than one parameter or operation-output binding.
+    ValueAlreadyBound,
+    /// An operation output does not name that operation as its definition.
+    OutputDefiningOpMismatch,
+    /// An operand's owner or index does not identify its containing input slot.
+    OperandOwnerMismatch,
+    /// An operand refers to a value that the function does not bind.
+    OperandValueNotOwned,
+    /// An operand refers to an output of a later operation.
+    OperandUseBeforeDefinition,
+    /// A function return refers to a value that the function does not bind.
+    ReturnValueNotOwned,
     UnsupportedAval,
     InvalidOpArity,
     InvalidParams,
@@ -1012,9 +1027,99 @@ fn same_tensor_signature(a: Tensor, b: Tensor) bool {
     return true;
 }
 
-/// Validate a single function: per-op validation via the op registry.
-pub fn validate_ops_in_func(func: Function) ValidationError!void {
-    for (func.ops) |op| try ops.validate(op);
+/// Validate a function's flat SSA structure and operation invariants.
+///
+/// - Parameters form the initial bindings. Each is unique and has no defining
+///   operation.
+/// - Every operand refers to a parameter or an output of a preceding operation.
+/// - Each output is unique and names its containing operation as its definition.
+/// - Operand owner and index fields identify the input slot containing it.
+/// - Function returns refer to values bound anywhere in the function.
+///
+/// Operation inputs and function returns are variable references, so expressions
+///  cannot nest. Together with unique, ordered bindings, these checks enforce the
+///  function's A-normal form.
+///
+/// Operation-specific arity, parameter, and type invariants are validated after
+///  the structural checks for each operation.
+pub fn validate_function(func: Function) ValidationError!void {
+    for (func.params, 0..) |param, index| {
+        if (param.defining_op != null) {
+            pr_log.debug("parameter {d} in '{s}' has a defining operation", .{ index, func.name });
+            return error.ParameterHasDefiningOp;
+        }
+        if (value_is_bound(func.params[0..index], &.{}, param)) {
+            pr_log.debug("parameter {d} in '{s}' is already bound", .{ index, func.name });
+            return error.ValueAlreadyBound;
+        }
+    }
+
+    for (func.ops, 0..) |op, op_index| {
+        const preceding_ops = func.ops[0..op_index];
+        for (op.inputs, 0..) |*operand, operand_index| {
+            if (operand.owner != op or operand.index != operand_index) {
+                pr_log.debug("operand {d} of operation {d} in '{s}' has inconsistent ownership", .{ operand_index, op.id, func.name });
+                return error.OperandOwnerMismatch;
+            }
+            if (value_is_bound(func.params, preceding_ops, operand.value)) continue;
+            if (value_is_bound(func.params, func.ops, operand.value)) {
+                pr_log.debug("operand {d} of operation {d} in '{s}' is used before its definition", .{ operand_index, op.id, func.name });
+                return error.OperandUseBeforeDefinition;
+            }
+            pr_log.debug("operand {d} of operation {d} in '{s}' is not owned by the function", .{ operand_index, op.id, func.name });
+            return error.OperandValueNotOwned;
+        }
+
+        for (op.outputs, 0..) |output, output_index| {
+            if (output.defining_op != op) {
+                pr_log.debug("output {d} of operation {d} in '{s}' names a different defining operation", .{ output_index, op.id, func.name });
+                return error.OutputDefiningOpMismatch;
+            }
+            if (value_is_bound(func.params, preceding_ops, output)) {
+                pr_log.debug("output {d} of operation {d} in '{s}' is already bound", .{ output_index, op.id, func.name });
+                return error.ValueAlreadyBound;
+            }
+            for (op.outputs[0..output_index]) |prior| {
+                if (output == prior) {
+                    pr_log.debug("output {d} of operation {d} in '{s}' is already bound", .{ output_index, op.id, func.name });
+                    return error.ValueAlreadyBound;
+                }
+            }
+        }
+        try ops.validate(op);
+    }
+
+    for (func.returns, 0..) |return_var, index| {
+        if (value_is_bound(func.params, func.ops, return_var)) continue;
+        pr_log.debug("return {d} in '{s}' is not owned by the function", .{ index, func.name });
+        return error.ReturnValueNotOwned;
+    }
+}
+
+fn value_is_bound(params: []const *Var, function_ops: []const *Op, value: *const Var) bool {
+    if (value.defining_op) |defining_op| {
+        const op_index: usize = defining_op.id;
+        if (op_index < function_ops.len and function_ops[op_index] == defining_op) {
+            for (defining_op.outputs) |output| {
+                if (output == value) return true;
+            }
+            return false;
+        }
+        for (function_ops) |op| {
+            if (op != defining_op) continue;
+            for (op.outputs) |output| {
+                if (output == value) return true;
+            }
+            return false;
+        }
+        return false;
+    }
+    const param_index: usize = value.id;
+    if (param_index < params.len and params[param_index] == value) return true;
+    for (params) |param| {
+        if (param == value) return true;
+    }
+    return false;
 }
 
 pub fn validate_program(program: *const Program) ValidationError!void {
@@ -1029,7 +1134,7 @@ pub fn validate_program(program: *const Program) ValidationError!void {
             program.function_index_by_id.get(id) != i or
             program.next_function_id <= @intFromEnum(id))
             return error.FunctionIdentityMismatch;
-        try validate_ops_in_func(func);
+        try validate_function(func);
         try validate_annotations(func.annotations);
         for (func.regions) |region| {
             try validate_annotations(region.annotations);
@@ -1296,6 +1401,12 @@ pub const FunctionBuilder = struct {
     ) BuildError!*Op {
         const a = self.alloc();
 
+        for (inputs, 0..) |input, index| {
+            if (value_is_bound(self.params_list.items, self.ops_list.items, input)) continue;
+            pr_log.debug("input {d} for the next operation in '{s}' is not owned by the builder", .{ index, self.name });
+            return error.OperandValueNotOwned;
+        }
+
         try self.ops_list.ensureUnusedCapacity(a, 1);
         const out_vars = try a.alloc(*Var, result_types.len());
         const vars = try a.alloc(Var, result_types.len());
@@ -1551,15 +1662,16 @@ pub const FunctionBuilder = struct {
             .selected => |selected| try self.select_parameters(selected, options.returns),
         };
         const stored_returns = try a.dupe(*Var, options.returns);
-        const var_count = self.assign_var_ids(stored_params);
-        const func = Function{
+        var func = Function{
             .name = self.name,
             .params = stored_params,
             .returns = stored_returns,
             .ops = self.ops_list.items,
             .regions = self.completed_regions.items,
-            .var_count = var_count,
+            .var_count = self.next_var_id,
         };
+        try validate_function(func);
+        func.var_count = self.assign_var_ids(stored_params);
         self.params_list = .empty;
         self.ops_list = .empty;
         self.completed_regions = .empty;
@@ -1781,7 +1893,7 @@ test "FunctionBuilder broadcast_in_dim basic" {
     const x = try b.param_tensor(.f32, &.{3});
     const y = try b.broadcast_in_dim(x, &.{ 2, 3 }, &.{1});
     const func = try b.finish(.{ .returns = &.{y} });
-    try validate_ops_in_func(func);
+    try validate_function(func);
 }
 
 test "FunctionBuilder transpose validation" {
@@ -1794,7 +1906,7 @@ test "FunctionBuilder transpose validation" {
     const x = try b.param_tensor(.f32, &.{ 2, 3, 4 });
     const y = try b.transpose(x, &.{ 2, 0, 1 });
     const func = try b.finish(.{ .returns = &.{y} });
-    try validate_ops_in_func(func);
+    try validate_function(func);
 }
 
 test "FunctionBuilder reduce basic" {
@@ -1807,7 +1919,7 @@ test "FunctionBuilder reduce basic" {
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const y = try b.reduce(x, .{ .axes = &.{0}, .operation = .sum });
     const func = try b.finish(.{ .returns = &.{y} });
-    try validate_ops_in_func(func);
+    try validate_function(func);
 }
 
 test "FunctionBuilder finish preserves state after validation failure" {
@@ -1917,6 +2029,114 @@ test "FunctionBuilder finish rejects invalid parameter selections" {
     }
 }
 
+test "FunctionBuilder rejects values from another function" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var foreign_builder = try FunctionBuilder.init(&program, "foreign");
+    defer foreign_builder.deinit();
+    const foreign_param = try foreign_builder.param_tensor(.f32, &.{2});
+    const foreign_result = try foreign_builder.exp(foreign_param);
+
+    var builder = try FunctionBuilder.init(&program, "main");
+    defer builder.deinit();
+    const local = try builder.param_tensor(.f32, &.{2});
+
+    try std.testing.expectError(error.OperandValueNotOwned, builder.add(local, foreign_param));
+    try std.testing.expectError(error.OperandValueNotOwned, builder.add(local, foreign_result));
+    try std.testing.expectError(
+        error.ReturnValueNotOwned,
+        builder.finish(.{ .returns = &.{foreign_result} }),
+    );
+
+    const output = try builder.exp(local);
+    _ = try builder.finish(.{ .returns = &.{output} });
+}
+
+test "FunctionBuilder finish rechecks rebound operands" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var foreign_builder = try FunctionBuilder.init(&program, "foreign");
+    defer foreign_builder.deinit();
+    const foreign = try foreign_builder.param_tensor(.f32, &.{2});
+
+    var builder = try FunctionBuilder.init(&program, "main");
+    defer builder.deinit();
+    const lhs = try builder.param_tensor(.f32, &.{2});
+    const rhs = try builder.param_tensor(.f32, &.{2});
+    const output = try builder.add(lhs, rhs);
+    const later = try builder.exp(lhs);
+    const operand = &output.defining_op.?.inputs[0];
+
+    operand.set(later);
+    try std.testing.expectError(
+        error.OperandUseBeforeDefinition,
+        builder.finish(.{ .returns = &.{output} }),
+    );
+
+    operand.set(foreign);
+    try std.testing.expectError(
+        error.OperandValueNotOwned,
+        builder.finish(.{ .returns = &.{output} }),
+    );
+
+    operand.set(lhs);
+    _ = try builder.finish(.{ .returns = &.{output} });
+}
+
+test "validate_program rejects cross-function operands" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var first_builder = try FunctionBuilder.init(&program, "first");
+    defer first_builder.deinit();
+    const first_lhs = try first_builder.param_tensor(.f32, &.{2});
+    const first_rhs = try first_builder.param_tensor(.f32, &.{2});
+    const first_output = try first_builder.add(first_lhs, first_rhs);
+    const first_id = try program.add_function(try first_builder.finish(.{ .returns = &.{first_output} }));
+
+    var second_builder = try FunctionBuilder.init(&program, "second");
+    defer second_builder.deinit();
+    const second_param = try second_builder.param_tensor(.f32, &.{2});
+    _ = try program.add_function(try second_builder.finish(.{ .returns = &.{second_param} }));
+
+    const first = program.get_function_by_id(first_id).?;
+    first.ops[0].inputs[0].set(second_param);
+    try std.testing.expectError(error.OperandValueNotOwned, validate_program(&program));
+}
+
+test "validate_function rejects malformed SSA structure" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var builder = try FunctionBuilder.init(&program, "main");
+    defer builder.deinit();
+    const lhs = try builder.param_tensor(.f32, &.{2});
+    const rhs = try builder.param_tensor(.f32, &.{2});
+    const output = try builder.add(lhs, rhs);
+    const function = try builder.finish(.{ .returns = &.{output} });
+    const op = function.ops[0];
+
+    lhs.defining_op = op;
+    try std.testing.expectError(error.ParameterHasDefiningOp, validate_function(function));
+    lhs.defining_op = null;
+
+    function.params[1] = lhs;
+    try std.testing.expectError(error.ValueAlreadyBound, validate_function(function));
+    function.params[1] = rhs;
+
+    op.inputs[0].index = 1;
+    try std.testing.expectError(error.OperandOwnerMismatch, validate_function(function));
+    op.inputs[0].index = 0;
+
+    output.defining_op = null;
+    try std.testing.expectError(error.OutputDefiningOpMismatch, validate_function(function));
+    output.defining_op = op;
+
+    try validate_function(function);
+}
+
 test "FunctionBuilder releases allocations after every allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
         fn build(allocator: Allocator) !void {
@@ -1962,7 +2182,7 @@ test "FunctionBuilder literal scalar" {
 
     const one = try b.literal_scalar(.{ .f32 = 1.0 });
     const func = try b.finish(.{ .returns = &.{one} });
-    try validate_ops_in_func(func);
+    try validate_function(func);
 }
 
 test "Literal.from_f64 tags by DType" {

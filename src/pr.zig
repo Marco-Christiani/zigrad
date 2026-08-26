@@ -51,7 +51,7 @@ pub const RegionIterator = core.RegionIterator;
 pub const Program = core.Program;
 
 pub const ValidationError = core.ValidationError;
-pub const validate_ops_in_func = core.validate_ops_in_func;
+pub const validate_function = core.validate_function;
 pub const validate_program = core.validate_program;
 
 /// Validates a borrowed PR program and returns it unchanged.

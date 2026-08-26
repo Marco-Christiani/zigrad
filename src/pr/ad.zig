@@ -1486,7 +1486,7 @@ test "vjp produces gradients matching input shapes" {
 
     const vjp_id = try vjp(std.testing.allocator, &program, source_id, "vjp", .{});
     const vjp_func = program.get_function_by_id(vjp_id).?;
-    try pr.validate_ops_in_func(vjp_func);
+    try pr.validate_function(vjp_func);
 
     try std.testing.expectEqual(@as(usize, func.params.len + func.returns.len), vjp_func.params.len);
     try std.testing.expectEqual(@as(usize, func.params.len), vjp_func.returns.len);
@@ -1517,7 +1517,7 @@ test "vjp selects output cotangent seeds" {
         .of = &.{1},
     });
     const vjp_func = program.get_function_by_id(vjp_id).?;
-    try pr.validate_ops_in_func(vjp_func);
+    try pr.validate_function(vjp_func);
 
     try std.testing.expectEqual(@as(usize, 2), vjp_func.params.len);
     try std.testing.expectEqual(@as(usize, 1), vjp_func.returns.len);
@@ -1556,7 +1556,7 @@ test "vjp accumulates duplicate output seeds" {
         .of = &.{ 0, 0 },
     });
     const vjp_func = program.get_function_by_id(vjp_id).?;
-    try pr.validate_ops_in_func(vjp_func);
+    try pr.validate_function(vjp_func);
 
     try std.testing.expectEqual(@as(usize, 3), vjp_func.params.len);
     try std.testing.expectEqual(@as(usize, 1), vjp_func.returns.len);
@@ -1600,7 +1600,7 @@ test "vjp can include primals before gradients" {
         .include_primal_outputs = true,
     });
     const vjp_func = program.get_function_by_id(vjp_id).?;
-    try pr.validate_ops_in_func(vjp_func);
+    try pr.validate_function(vjp_func);
 
     try std.testing.expectEqual(@as(usize, func.returns.len + func.params.len), vjp_func.returns.len);
 }
@@ -1646,7 +1646,7 @@ test "dot_general vjp supports 2 batch dims" {
 
     const vjp_id = try vjp(std.testing.allocator, &program, source_id, "vjp", .{});
     const vjp_func = program.get_function_by_id(vjp_id).?;
-    try pr.validate_ops_in_func(vjp_func);
+    try pr.validate_function(vjp_func);
 
     try std.testing.expectEqual(@as(usize, func.params.len + func.returns.len), vjp_func.params.len);
     try std.testing.expectEqual(@as(usize, func.params.len), vjp_func.returns.len);
@@ -1682,7 +1682,7 @@ test "dot_general vjp supports non-prefix batch dims" {
 
     const vjp_id = try vjp(std.testing.allocator, &program, source_id, "vjp", .{});
     const vjp_func = program.get_function_by_id(vjp_id).?;
-    try pr.validate_ops_in_func(vjp_func);
+    try pr.validate_function(vjp_func);
 }
 
 test "dot_general vjp supports differing batch dim positions" {
@@ -1707,7 +1707,7 @@ test "dot_general vjp supports differing batch dim positions" {
 
     const vjp_id = try vjp(std.testing.allocator, &program, source_id, "vjp", .{});
     const vjp_func = program.get_function_by_id(vjp_id).?;
-    try pr.validate_ops_in_func(vjp_func);
+    try pr.validate_function(vjp_func);
 }
 
 test "dot_general vjp supports multi-contract dims" {
@@ -1732,7 +1732,7 @@ test "dot_general vjp supports multi-contract dims" {
 
     const vjp_id = try vjp(std.testing.allocator, &program, source_id, "vjp", .{});
     const vjp_func = program.get_function_by_id(vjp_id).?;
-    try pr.validate_ops_in_func(vjp_func);
+    try pr.validate_function(vjp_func);
 }
 
 test "jvp produces tangent outputs matching function output shapes" {
@@ -1755,7 +1755,7 @@ test "jvp produces tangent outputs matching function output shapes" {
 
     const jvp_id = try jvp(std.testing.allocator, &program, source_id, "jvp", .{});
     const jvp_func = program.get_function_by_id(jvp_id).?;
-    try pr.validate_ops_in_func(jvp_func);
+    try pr.validate_function(jvp_func);
 
     try std.testing.expectEqual(func.params.len * 2, jvp_func.params.len);
     try std.testing.expectEqual(func.returns.len, jvp_func.returns.len);
@@ -1936,7 +1936,7 @@ test "jvp can include primals before tangents" {
         .include_primal_outputs = true,
     });
     const jvp_func = program.get_function_by_id(jvp_id).?;
-    try pr.validate_ops_in_func(jvp_func);
+    try pr.validate_function(jvp_func);
 
     try std.testing.expectEqual(func.returns.len * 2, jvp_func.returns.len);
     try std.testing.expectEqual(func.params.len * 2, jvp_func.params.len);
@@ -2021,7 +2021,7 @@ test "dot_general jvp with batch dims" {
 
     const jvp_id = try jvp(std.testing.allocator, &program, source_id, "jvp", .{});
     const jvp_func = program.get_function_by_id(jvp_id).?;
-    try pr.validate_ops_in_func(jvp_func);
+    try pr.validate_function(jvp_func);
 
     const orig_t = func.returns[0].as_tensor();
     const jvp_t = jvp_func.returns[0].as_tensor();
