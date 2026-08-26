@@ -207,6 +207,7 @@ pub fn build(b: *std.Build) void {
     const lib_tests = b.addTest(.{
         .name = "zigrad-tests",
         .root_module = zigrad_mod,
+        .filters = b.args orelse &.{},
     });
     if (use_mlir) link_mlir_stablehlo_capi(lib_tests, sdk_lib.?);
     if (has_external_integration)
@@ -228,6 +229,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "zigrad", .module = zigrad_mod },
             },
         }),
+        .filters = b.args orelse &.{},
     });
     if (use_mlir) link_mlir_stablehlo_capi(cli_tests, sdk_lib.?);
     if (has_external_integration)
