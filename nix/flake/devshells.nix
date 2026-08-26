@@ -24,6 +24,7 @@
     '';
 
     mlirCppExampleDev = config.packages.zigrad-example-mlir-cpp-dev;
+    devCuda = zigradBuildConfigurations.dev-cuda;
 
     baseDevShellPkgs = with pkgs; [
       zig
@@ -44,6 +45,18 @@
       export PATH="${clangdWrapped}/bin:$PATH"
     '';
 
+    devShellHook = name: ''
+      export ZG_DEVSHELL=${pkgs.lib.escapeShellArg name}
+
+      if [[ ( ''${DIRENV_IN_ENVRC:-0} == 1 || ( $- == *i* && -t 1 ) ) && ''${ZG_DEVSHELL_QUIET:-} != 1 ]]; then
+        printf '%s\n' \
+          "Zigrad development shell: $ZG_DEVSHELL" \
+          "  targets: zig build -l" \
+          "  core tests: zig build test --summary all" \
+          "  configured build flags: $ZG_ZIG_BUILD_ARGS"
+      fi
+    '';
+
     mlirCppExampleHook = ''
       export PATH="${mlirCppExampleDev}/bin:$PATH"
     '';
@@ -61,16 +74,16 @@
         xgboost
       ]);
 
-    integrationEnv = package: let
-      externalInputs = package.externalInputs;
+    integrationEnv = configuration: let
+      externalInputs = configuration.externalInputs.combined;
       externalInputsStr = toString externalInputs;
-      runtimeStr = toString externalInputs.runtime;
+      runtimeStr = toString configuration.externalInputs.runtime;
     in
-      package.configuration.runtimeEnv
+      configuration.runtimeEnv
       // {
         ZG_EXTERNAL_SDK_ROOT = externalInputsStr;
         ZG_RUNTIME_SDK_ROOT = runtimeStr;
-        ZG_ZIG_BUILD_ARGS = package.configuration.zigFeatureFlags;
+        ZG_ZIG_BUILD_ARGS = configuration.zigFeatureFlags;
         ZG_MIRAGE_RUNTIME_LIBRARY = "${config.packages.mirage}/lib/libmirage_runtime.so";
         ZG_NLOHMANN_JSON_INCLUDE_DIR = "${pkgs.lib.getDev pkgs.nlohmann_json}/include";
         PJRT_CPU_PLUGIN_PATH = "${runtimeStr}/runtime/xla/pjrt/c/pjrt_c_api_cpu_plugin.so";
@@ -84,15 +97,15 @@
         ZG_LLVM_VIM_RT = "${externalSources.llvm.src}/llvm/utils/vim";
       };
 
-    runtimeLibraryHook = package: let
-      runtime = toString package.externalInputs.runtime;
+    runtimeLibraryHook = configuration: let
+      runtime = toString configuration.externalInputs.runtime;
       paths =
         [
           "${runtime}/lib"
           "${runtime}/runtime/sys/lib"
         ]
         ++ pkgs.lib.optional
-        (pkgs.lib.elem "cuda-driver" package.configuration.resolved)
+        (pkgs.lib.elem "cuda-driver" configuration.resolved)
         "/run/opengl-driver/lib";
     in ''
       export LD_LIBRARY_PATH="${pkgs.lib.concatStringsSep ":" paths}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -100,11 +113,12 @@
   in {
     devShells = {
       default = pkgs.mkShellNoCC {
-        packages = baseDevShellPkgs ++ [config.packages.zigrad-dev-cuda];
-        env = integrationEnv config.packages.zigrad-dev-cuda;
+        packages = baseDevShellPkgs;
+        env = integrationEnv devCuda;
         shellHook =
-          lspShadowHook
-          + runtimeLibraryHook config.packages.zigrad-dev-cuda
+          devShellHook "default"
+          + lspShadowHook
+          + runtimeLibraryHook devCuda
           + ''
             # zig is not happy about -fmacro-prefix-map
             unset NIX_CFLAGS_COMPILE
@@ -112,11 +126,12 @@
       };
 
       tvm-python = pkgs.mkShellNoCC {
-        packages = baseDevShellPkgs ++ [tvmPython zigradBuildConfigurations.dev-cuda-tvm-python.package];
-        env = integrationEnv zigradBuildConfigurations.dev-cuda-tvm-python.package;
+        packages = baseDevShellPkgs ++ [tvmPython];
+        env = integrationEnv zigradBuildConfigurations.dev-cuda-tvm-python;
         shellHook =
-          lspShadowHook
-          + runtimeLibraryHook zigradBuildConfigurations.dev-cuda-tvm-python.package
+          devShellHook "tvm-python"
+          + lspShadowHook
+          + runtimeLibraryHook zigradBuildConfigurations.dev-cuda-tvm-python
           + ''
             export PYTHONPATH="$ZG_EXTERNAL_SDK_ROOT/python''${PYTHONPATH:+:$PYTHONPATH}"
 
@@ -125,36 +140,28 @@
           '';
       };
 
-      # TODO: update or delete this (should be updated)
-      zig = pkgs.mkShellNoCC {
-        packages = baseDevShellPkgs ++ [config.packages.zigrad-dev-cuda];
-        env = integrationEnv config.packages.zigrad-dev-cuda;
-        shellHook =
-          lspShadowHook
-          + runtimeLibraryHook config.packages.zigrad-dev-cuda;
-      };
-
       profiling = pkgs.mkShellNoCC {
         packages =
           baseDevShellPkgs
           ++ [
-            config.packages.zigrad-dev-cuda
             cudaPackages.nsight_systems
             cudaPackages.nsight_compute
           ];
-        env = integrationEnv config.packages.zigrad-dev-cuda;
+        env = integrationEnv devCuda;
         shellHook =
-          lspShadowHook
-          + runtimeLibraryHook config.packages.zigrad-dev-cuda;
+          devShellHook "profiling"
+          + lspShadowHook
+          + runtimeLibraryHook devCuda;
       };
 
       mlir-cpp = pkgs.mkShellNoCC {
-        packages = baseDevShellPkgs ++ [mlirCppExampleDev config.packages.zigrad-dev-cuda];
-        env = integrationEnv config.packages.zigrad-dev-cuda;
+        packages = baseDevShellPkgs ++ [mlirCppExampleDev];
+        env = integrationEnv devCuda;
         shellHook =
-          lspShadowHook
+          devShellHook "mlir-cpp"
+          + lspShadowHook
           + mlirCppExampleHook
-          + runtimeLibraryHook config.packages.zigrad-dev-cuda;
+          + runtimeLibraryHook devCuda;
       };
     };
   };
