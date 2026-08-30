@@ -1,4 +1,4 @@
-# Package a Zig executable that imports Zigrad with one named configuration.
+# Build and package a Zig executable that imports Zigrad.
 {
   autoAddDriverRunpath,
   autoPatchelfHook,
@@ -7,15 +7,19 @@
   makeWrapper,
   stdenvNoCC,
   zig,
-  configuration,
+  externalInputs,
   mainProgram,
   pname,
   src,
   sourceSubdir ? ".",
   zigradSrc,
-  usePackagedZigrad ? false,
-  externalInputs ? configuration.externalInputs,
-  runtimePolicy ? configuration.configuration.runtimeEnvPolicy,
+  runtimePolicy ? {
+    fixed = {};
+    defaults = {};
+    prefixes = {};
+  },
+  zigDependencySets ? [],
+  needsCudaDriverRunpath ? false,
   targetPkgs ? null,
   zigArgs ? [],
   optimize ? "ReleaseFast",
@@ -23,6 +27,7 @@
   testProgram ? null,
   withRuntimeEnvironment ? true,
 }: let
+  compileInputs = externalInputs.compile;
   runtimeInputs = externalInputs.runtime;
   zigTarget =
     if targetPkgs == null
@@ -38,13 +43,9 @@
     "${runtimeInputs}/runtime/sys/lib"
   ];
   runtimeLibraryPath = lib.concatStringsSep ":" runtimeLibraryPaths;
-  needsCudaDriverRunpath = lib.elem "cuda-driver" configuration.configuration.resolved;
   zigDeps = callPackage ./zig-dependencies.nix {
-    withPjrt =
-      lib.elem "pjrt-cpu" configuration.configuration.resolved
-      || lib.elem "pjrt-cuda" configuration.configuration.resolved;
+    requestedSets = zigDependencySets;
   };
-  zigFeatureArgs = lib.escapeShellArgs configuration.configuration.zigFeatureArgs;
   testProgramName =
     if testProgram != null
     then testProgram
@@ -77,11 +78,11 @@ in
       [
         zig
         autoPatchelfHook
-        makeWrapper
       ]
+      ++ lib.optional withRuntimeEnvironment makeWrapper
       ++ lib.optional needsCudaDriverRunpath autoAddDriverRunpath;
 
-    buildInputs = [externalInputs];
+    buildInputs = [compileInputs];
     runtimeDependencies = [runtimeInputs];
 
     configurePhase = ''
@@ -93,51 +94,32 @@ in
       cp -a ${zigDeps}/. "$ZG_ZIG_SYSTEM_PACKAGES/"
       chmod u+w "$ZG_ZIG_SYSTEM_PACKAGES"
 
-      ${
-        if usePackagedZigrad
-        then ''
-          sed -i \
-            '/^[[:space:]]*\.zigrad = \.{[[:space:]]*$/,/^[[:space:]]*},[[:space:]]*$/c\        .zigrad = .{ .path = "../.." },' \
-            ${lib.escapeShellArg sourceSubdir}/build.zig.zon
-        ''
-        else ''
-          zigrad_package_name="$(zig fetch ${zigradSrc})"
-          test -n "$zigrad_package_name"
-          ln -s ${zigradSrc} "$ZG_ZIG_SYSTEM_PACKAGES/$zigrad_package_name"
-        ''
-      }
+      ln -s ${zigradSrc} ${lib.escapeShellArg sourceSubdir}/.zigrad-source
+      (
+        cd ${lib.escapeShellArg sourceSubdir}
+        zig fetch --save-exact=zigrad .zigrad-source
+      )
       runHook postConfigure
     '';
 
-    buildPhase = ''
-      runHook preBuild
-      export ZG_ZIG_SYSTEM_PACKAGES="$TMPDIR/zigrad-system-packages"
-      cd ${lib.escapeShellArg sourceSubdir}
-      TERM=dumb zig build \
-        -j"$NIX_BUILD_CORES" \
-        -Doptimize=${lib.escapeShellArg optimize} \
-        -Dsdk=${externalInputs} \
-        -Dtarget=${lib.escapeShellArg zigTarget} \
-        ${zigFeatureArgs} \
-        ${lib.escapeShellArgs zigArgs} \
-        --system "$ZG_ZIG_SYSTEM_PACKAGES" \
-        --verbose
-      runHook postBuild
-    '';
+    dontBuild = true;
 
     checkPhase = ''
       runHook preCheck
       export ZG_ZIG_SYSTEM_PACKAGES="$TMPDIR/zigrad-system-packages"
       testRoot=$(mktemp -d)
-      TERM=dumb zig build test-compile \
-        -j"$NIX_BUILD_CORES" \
-        -Doptimize=${lib.escapeShellArg optimize} \
-        -Dsdk=${externalInputs} \
-        -Dtarget=${lib.escapeShellArg zigTarget} \
-        ${lib.escapeShellArgs zigArgs} \
-        --system "$ZG_ZIG_SYSTEM_PACKAGES" \
-        --prefix "$testRoot" \
-        --verbose
+      (
+        cd ${lib.escapeShellArg sourceSubdir}
+        TERM=dumb zig build test-compile \
+          -j"$NIX_BUILD_CORES" \
+          -Doptimize=${lib.escapeShellArg optimize} \
+          -Dsdk=${compileInputs} \
+          -Dtarget=${lib.escapeShellArg zigTarget} \
+          ${lib.escapeShellArgs zigArgs} \
+          --system "$ZG_ZIG_SYSTEM_PACKAGES" \
+          --prefix "$testRoot" \
+          --verbose
+      )
       autoPatchelf "$testRoot/bin"
       "$testRoot/bin/${testProgramName}"
       runHook postCheck
@@ -148,12 +130,12 @@ in
     installPhase = ''
       runHook preInstall
       export ZG_ZIG_SYSTEM_PACKAGES="$TMPDIR/zigrad-system-packages"
+      cd ${lib.escapeShellArg sourceSubdir}
       TERM=dumb zig build install \
         -j"$NIX_BUILD_CORES" \
         -Doptimize=${lib.escapeShellArg optimize} \
-        -Dsdk=${externalInputs} \
+        -Dsdk=${compileInputs} \
         -Dtarget=${lib.escapeShellArg zigTarget} \
-        ${zigFeatureArgs} \
         ${lib.escapeShellArgs zigArgs} \
         --system "$ZG_ZIG_SYSTEM_PACKAGES" \
         --prefix "$out" \

@@ -66,7 +66,7 @@ class DependencyPlannerTest(unittest.TestCase):
     def test_shared_exact_requirement_selects_candidate(self) -> None:
         manifest = {
             "shared": {
-                "packageName": "zigrad-shared",
+                "pname": "zigrad-shared",
                 "compatibility": [
                     {
                         "group": "host-llvm",
@@ -103,7 +103,7 @@ class DependencyPlannerTest(unittest.TestCase):
     def test_standalone_range_uses_snapshot_policy(self) -> None:
         manifest = {
             "tvm": {
-                "packageName": "zigrad-tvm",
+                "pname": "zigrad-tvm",
                 "compatibility": [
                     {
                         "group": "host-llvm",
@@ -161,7 +161,7 @@ class DependencyPlannerTest(unittest.TestCase):
     def test_iree_candidate_revision_must_be_materialized(self) -> None:
         manifest = {
             "iree": {
-                "packageName": "zigrad-iree",
+                "pname": "zigrad-iree",
                 "compatibility": [
                     {
                         "group": "iree-build-llvm",
@@ -224,7 +224,7 @@ class DependencyPlannerTest(unittest.TestCase):
         }
         manifest = {
             "xla": {
-                "packageName": "zigrad-xla",
+                "pname": "zigrad-xla",
                 "resolved": ["stablehlo-mlir"],
             },
         }
@@ -263,7 +263,7 @@ class DependencyPlannerTest(unittest.TestCase):
         }
         manifest = {
             "iree": {
-                "packageName": "zigrad-iree",
+                "pname": "zigrad-iree",
                 "resolved": ["iree"],
             },
         }
@@ -296,7 +296,7 @@ class DependencyPlannerTest(unittest.TestCase):
     def test_candidate_must_be_demanded_by_configuration(self) -> None:
         manifest = {
             "core": {
-                "packageName": "zigrad",
+                "pname": "zigrad",
                 "resolved": [],
             },
         }
@@ -324,7 +324,7 @@ class DependencyPlannerTest(unittest.TestCase):
         }
         manifest = {
             "mirage": {
-                "packageName": "zigrad-mirage",
+                "pname": "zigrad-mirage",
                 "resolved": ["mirage-cuda"],
             },
         }
@@ -361,7 +361,7 @@ class DependencyPlannerTest(unittest.TestCase):
         }
         manifest = {
             "mirage": {
-                "packageName": "zigrad-mirage",
+                "pname": "zigrad-mirage",
                 "resolved": ["mirage-cuda"],
             },
         }

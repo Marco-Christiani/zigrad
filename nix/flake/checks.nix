@@ -6,10 +6,10 @@
     ...
   }: let
     zigrad = config.packages.zigrad;
-    zigradXlaCpu = config.packages.zigrad-xla-cpu;
-    zigradIreeCpu = config.packages.zigrad-iree-cpu;
-    zigradTvmCpu = config.packages.zigrad-tvm-cpu;
-    zigradDevCuda = config.packages.zigrad-dev-cuda;
+    zigradXlaCpu = config.packages."xla:cpu";
+    zigradIreeCpu = config.packages."iree:cpu";
+    zigradTvmCpu = config.packages."tvm:cpu";
+    zigradDevCuda = config.packages."xla:cuda+iree:cpu+tvm:cuda+mirage:cuda";
     benchmarkExample = config.packages.zigrad-example-benchmark;
     basicDeploymentCpu = config.packages.zigrad-example-basic-deployment-cpu;
     cifar10Cpu = config.packages.zigrad-example-cifar10-cpu;
@@ -19,6 +19,12 @@
     llamaTraining = config.packages.zigrad-example-llama-training;
     mnistExample = config.packages.zigrad-example-mnist;
     mlirCppExample = config.packages.zigrad-example-mlir-cpp;
+    dependencyGraphFailures = pkgs.lib.runTests (
+      import ../lib/dependency-graph-tests.nix {inherit (pkgs) lib;}
+    );
+    dependencyGraphTests = assert pkgs.lib.assertMsg (dependencyGraphFailures == [])
+    "Zigrad dependency graph tests failed: ${builtins.toJSON dependencyGraphFailures}";
+      pkgs.writeText "zigrad-dependency-graph-tests" "passed\n";
 
     mkExampleCheck = {
       name,
@@ -130,10 +136,12 @@
   in {
     checks =
       {
-        zigrad-build = zigrad;
+        zigrad = zigrad;
+        zigrad-build-cli = config.packages.zigrad-build;
         zigrad-autodoc = config.packages.zigrad-autodoc;
         zigrad-unit-tests = zigradTests;
         zigrad-build-configurations = config.packages.zigrad-build-configurations;
+        zigrad-dependency-graph = dependencyGraphTests;
         zigrad-example-benchmark = checkBenchmarkExample;
         zigrad-example-basic-deployment-cpu = basicDeploymentCpu;
         zigrad-example-cifar10-cpu = cifar10Cpu;

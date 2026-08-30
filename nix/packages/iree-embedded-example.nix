@@ -2,12 +2,12 @@
 {
   lib,
   runCommand,
-  mkZigradZigPackage,
+  mkZigApplication,
 }: {
   name,
   description,
   source,
-  sourceSubdir,
+  sourceSubdir ? ".",
   zigradSrc,
   program,
   programName,
@@ -21,7 +21,7 @@
   compilerEnvironment ? {},
   embeddedFiles ? [],
   installCheckCommand ? null,
-  runnerExternalInputs ? runnerConfiguration.externalInputs.combined,
+  runnerExternalInputs ? runnerConfiguration.externalInputs,
   targetPkgs ? null,
   withRuntimeEnvironment ? false,
   passthru ? {},
@@ -40,13 +40,11 @@
       cp ${file.source}/${file.sourceName} ${sourceSubdir}/src/${file.destinationName}
     '')
     embeddedFiles;
-  runner = mkZigradZigPackage {
-    configuration = runnerConfiguration.package;
+  runner = mkZigApplication runnerConfiguration {
     pname = name;
     src = source;
     inherit mainProgram sourceSubdir zigradSrc targetPkgs;
     externalInputs = runnerExternalInputs;
-    usePackagedZigrad = true;
     zigArgs = runnerArguments;
     inherit withRuntimeEnvironment;
   };

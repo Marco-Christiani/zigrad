@@ -2,29 +2,26 @@
   callPackage,
   lib,
   runCommand,
-  mkZigradZigPackage,
+  mkZigApplication,
   source,
   zigradSrc,
   emitterConfiguration,
 }: let
-  sourceSubdir = "examples/cifar10-lifecycle";
   programName = "model.zgpr";
   vmfbName = "model.vmfb";
   checkpointName = "model.safetensors";
   mkIreeEmbeddedExample = callPackage ../../nix/packages/iree-embedded-example.nix {
-    inherit mkZigradZigPackage;
+    inherit mkZigApplication;
   };
   mkTool = {
     name,
     mode,
   }:
-    mkZigradZigPackage {
-      configuration = emitterConfiguration.package;
+    mkZigApplication emitterConfiguration {
       mainProgram = name;
       pname = "zigrad-example-cifar10-${name}";
       src = source;
-      inherit sourceSubdir zigradSrc;
-      usePackagedZigrad = true;
+      inherit zigradSrc;
       zigArgs = ["-Dmode=${mode}"];
       withRuntimeEnvironment = false;
     };
@@ -54,7 +51,7 @@ in
     compilerArguments ? [],
     compilerEnvironment ? {},
     runnerArguments ? [],
-    runnerExternalInputs ? runnerConfiguration.externalInputs.combined,
+    runnerExternalInputs ? runnerConfiguration.externalInputs,
     targetPkgs ? null,
     strip ? false,
     withRuntimeEnvironment ? false,
@@ -63,7 +60,7 @@ in
     mkIreeEmbeddedExample {
       name = "zigrad-example-cifar10-${name}";
       description = "Zigrad CIFAR-10 ${name} inference example";
-      inherit source sourceSubdir zigradSrc program programName vmfbName backend;
+      inherit source zigradSrc program programName vmfbName backend;
       inherit compilerConfiguration compilerArguments compilerEnvironment;
       inherit runnerConfiguration runnerExternalInputs targetPkgs withRuntimeEnvironment;
       mainProgram = "cifar10-infer";

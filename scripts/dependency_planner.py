@@ -285,7 +285,7 @@ def plan_configuration(
 
     return {
         "configuration": name,
-        "package": configuration["packageName"],
+        "package": configuration["pname"],
         "groups": groups,
         "compatible": all(group["compatible"] for group in groups),
     }

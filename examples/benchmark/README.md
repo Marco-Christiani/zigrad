@@ -80,7 +80,7 @@ TVM execution requires a target-specific tuning record. Run tuning from the
  Zigrad repository root before starting the benchmark:
 
 ```sh
-nix run .#zigrad-dev-cuda -- tvm tune \
+nix run '.#"xla:cuda+iree:cpu+tvm:cuda+mirage:cuda"' -- tvm tune \
   --shape 128x128x128 --trials 64 --trials-per-iter 16 --cpu
 ```
 

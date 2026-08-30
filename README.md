@@ -14,33 +14,42 @@
 ---
 
 > **Zigrad is under active development.**
-> This is the `modular` rewrite - a ground-up redesign as a compiler-oriented ML framework. APIs and architecture are evolving rapidly.
+> This is the `modular` rewrite - a ground-up redesign as a unified multi-level compiler and ML framework. APIs and architecture are evolving rapidly.
 
 ---
 
-Zigrad is a deep learning and ML compiler framework. Rather than tying you to a single runtime, Zigrad lowers your program to [MLIR](https://mlir.llvm.org/) and dispatches through pluggable backends and kernel providers, giving you a clear path from high-level model definition to hardware-optimized execution.
+Zigrad is a unified machine-learning stack for carrying one authored computation across the AI lifecycle without translation into parallel codebases.
+
+This tree contains an ML framework built on several external integrations while Zigrad's compiler stack is in progress. The MLIR, XLA, IREE, TVM, and Mirage integrations remain usable during that work.
 
 <p align="center">
   <img src="./assets/zigrad-pipeline.svg" width=700>
 </p>
 
-## Features
+## Capabilities
 
-- **Forward and reverse-mode AD** - VJP and JVP support (check out the llama training demo!)
-- **OpenXLA backend** - CPU/GPU/TPU/etc execution via XLA's portable runtime interface, dynamically loadable so no rebuild required to switch devices
-- **IREE backend** - AOT compilation with IREE for edge deployment
-- **Pluggable kernel providers** - [TVM](https://tvm.apache.org/) (MetaSchedule tuning) and [Mirage](https://github.com/mirage-project/mirage) Superoptimizer for custom kernel generation.
-- **MLIR lowering** - clean MLIR lowering pipeline with dump support at every stage and strong [OpenXLA](https://openxla.org/) and [IREE](https://iree.dev/) support via [StableHLO](https://github.com/openxla/stablehlo).
+- **Forward and reverse-mode AD** - JVP and VJP transformations over PR
+- **Core compiler passes** - outlining, delegation (eg to TVM, Mirage), compile-time AD rewrites, etc.
+- **OpenXLA backend** - Lower to the [StableHLO](https://github.com/openxla/stablehlo) dialect and execute via PJRT CPU/CUDA
+- **IREE backend** - AOT compilation + minimal runner for embedded targets
+- **Kernel delegation** - [TVM](https://tvm.apache.org/) and the Zigrad C API for [Mirage](https://github.com/mirage-project/mirage)
 <!-- - **Nix hermetic infrastructure** - hermetic devshell with LLVM, XLA, PJRT, TVM, and StableHLO pinned -->
-<!-- ([StableHLO](https://github.com/openxla/stablehlo) dialect for OpenXLA backend)  -->
+
+## Consumption Surfaces
+
+The repository defines three build-facing surfaces:
+
+1. The Zig source package exports the `zigrad` module. The core has no external compiler or runtime integrations.
+2. Nix packages install the `zigrad` CLI. Named configurations (see below) build that CLI with a set of integrations and provide the runtime environment needed to execute it.
+3. Devshells expose a broad composition of external compile and runtime inputs for iteration purposes.
 
 ## Getting Started
 
 > **Not user friendly yet**
 > Actively working on a proper on-ramp for users, this is not a primary concern at the moment.
-> The external integrations are expensive to build and are not yet a polished user installation path.
+> The external integrations are expensive to build and are not yet a polished installation.
 
-Nix is the standard build and execution interface. The integration-free package is the default:
+Nix is the standard build and execution interface. The core package is the default:
 
 ```sh
 nix build .#zigrad
@@ -48,74 +57,54 @@ nix run .#zigrad -- pr print-demo
 nix flake check
 ```
 
-Named configurations describe runnable combinations. Each name demands its transitive build and runtime dependencies. Users do not select matching external input fragments or repeat Zig feature flags.
+Named configurations describe valid combinations of integrations. Each demands its transitive build and runtime dependencies (e.g., XLA + IREE demands MLIR + StableHLO dialect). Every configuration depends on Zigrad core.
 
-| Package | Included path |
-|---|---|
-| `zigrad` | Integration-free PR tools and tests |
-| `zigrad-xla-cpu` | Current StableHLO, XLA, and PJRT CPU path |
-| `zigrad-xla-cuda` | Current StableHLO, XLA, and PJRT CUDA path |
-| `zigrad-iree-cpu` | Current StableHLO and IREE CPU path |
-| `zigrad-tvm-cpu` | Standalone TVM CPU tuning and execution |
-| `zigrad-tvm-cuda` | Standalone TVM CUDA tuning and execution |
-| `zigrad-tvm-xla-cpu` | TVM specialization on the current XLA CPU path |
-| `zigrad-tvm-xla-cuda` | TVM specialization on the current XLA CUDA path |
-| `zigrad-mirage-xla-cuda` | Mirage specialization on the current XLA CUDA path |
-| `zigrad-dev-cuda` | Every current integration used by the broad development shell |
+| Configuration | Included integrations |
+| --- | --- |
+| `zigrad` | Core only |
+| `xla:cpu` | XLA backend |
+| `xla:cuda` | XLA CUDA backend |
+| `iree:cpu` | IREE CPU backend |
+| `iree:cuda` | IREE CUDA backend |
+| `xla:cpu+iree:cpu` | XLA CPU and IREE CPU backends |
+| `xla:cuda+iree:cuda` | XLA CUDA + IREE CUDA backends |
+| `xla:cuda+iree:cpu` | XLA CUDA + IREE CPU backends |
+| `tvm:cpu` | TVM CPU tuning and execution |
+| `tvm:cuda` | TVM CUDA tuning and execution |
+| `xla:cpu+tvm:cpu` | XLA CPU backend + TVM CPU kernel specialization |
+| `xla:cuda+tvm:cuda` | XLA CUDA backend + TVM kernel specialization |
+| `xla:cuda+mirage:cuda` | XLA CUDA backend + Mirage kernel specialization |
+| `xla:cuda+iree:cpu+tvm:cuda+mirage:cuda` | Broad devshell composition |
 
-CUDA configurations require a working NVIDIA host driver. TVM and Mirage
-derive the runtime NVRTC target from the selected device. Restricting
-`cudaArchitectures` in `local-build-cfg.nix` limits upstream package
-compilation to the architectures used on the local system.
+TVM, Mirage, etc derive the runtime NVRTC target from the selected device. However,
+what architectures the upstream packages build for can be restricted by setting
+`cudaArchitectures` in `local-build-cfg.nix`. This can significantly reduce the
+cost/time to build external packages since these builds involve compiling many kernels.
+**This requires passing `--impure` to nix commands so it can read the local file, if this flag
+is omitted the config file is ignored. Simply add `--impure` to any of the documented nix commands.**
 
 For example:
 
 ```sh
-nix run .#zigrad-xla-cpu -- demo vjp
-nix run .#zigrad-iree-cpu -- demo basic --backend=iree
-nix run .#zigrad-tvm-cpu -- tvm check-load
+nix run '.#"xla:cpu"' -- demo vjp
+nix run '.#"iree:cpu"' -- demo basic --backend=iree
+nix run '.#"tvm:cpu"' -- tvm check-load
 ```
 
-The default development shell is intentionally broad:
+Devshell:
 
 ```sh
-direnv allow
-# or
-nix develop
+nix develop # or direnv allow
+zigrad --help
 ```
 
-It exports the composed external input roots and the matching `ZG_ZIG_BUILD_ARGS` for direct Zig iteration. These variables are development interfaces. The `tvm-python` shell adds TVM's Python bindings:
-
-```sh
-nix develop .#tvm-python
-```
-
-Zigrad remains buildable without Nix when Zig dependencies are available:
+The default devshell is intentionally broad (it is expensive to build) and exports the composed external input roots and the matching `ZG_ZIG_BUILD_ARGS` for direct Zig iteration.
+Zigrad remains buildable without Nix *when the external dependencies are available:*
 
 ```sh
 zig build
 zig build test --summary all
 ```
-
-## Architecture
-
-The pipeline has (generally) four core stages:
-
-| Stage | Name | Ownership | Role |
-|------:|------|-----------|------|
-| 1 | User Program | User | Define computation with Zigrad frontend API |
-| 2 | PR | Zigrad | Transformations (AD, legality, annotations) |
-| 3 | IM (i.e., StableHLO) | Shared | Serialized artifact handed to the backend |
-| 4 | Backend | Mixed | Compile IM -> EA, execute EA -> results |
-
-**Backends are runtime-loadable.** PJRT plugins, for example, are loaded at startup via `PJRT_PLUGIN_PATH`. Switching from CPU to GPU requires no recompilation.
-
-**Kernel providers are optional.** A provider (TVM, Mirage) can claim PR subgraphs and produce compiled kernel artifacts invoked at execution time. The baseline lowering path always exists and is always correct.
-
-## Roadmap
-
-- User-facing frontend APIs: our APIs are far too low level at the moment, this is actually intentional while the infrastructure evolves, but we plan a much simpler easier to use API shortly.
-- Distributable artifacts: removing the Nix requirement for users who simply want to use the library, this is already possible but not documented
 
 ## Contributing
 

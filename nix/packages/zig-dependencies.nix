@@ -4,7 +4,7 @@
   lib,
   linkFarm,
   stdenv,
-  withPjrt ? false,
+  requestedSets ? [],
 }: let
   safetensorsSource = {
     repository = "https://github.com/Marco-Christiani/safetensors-zg";
@@ -53,13 +53,22 @@
       stripRoot = false;
     };
   };
+
+  dependencySets = {
+    protobuf = [
+      protobuf
+      protoc
+    ];
+  };
+  selectedPackages = lib.concatMap (
+    name:
+      dependencySets.${name}
+      or (throw "zig-dependencies: unknown dependency set '${name}'")
+  ) (lib.unique requestedSets);
 in
   (linkFarm "zig-packages" (
     [safetensors]
-    ++ lib.optionals withPjrt [
-      protobuf
-      protoc
-    ]
+    ++ selectedPackages
   )).overrideAttrs (_: {
     passthru.autodocSources.safetensors_zg = safetensorsSource;
   })

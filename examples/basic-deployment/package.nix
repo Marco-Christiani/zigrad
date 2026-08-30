@@ -2,23 +2,20 @@
   callPackage,
   lib,
   runCommand,
-  mkZigradZigPackage,
+  mkZigApplication,
   source,
   zigradSrc,
   emitterConfiguration,
 }: let
-  sourceSubdir = "examples/basic-deployment";
   programName = "model.zgpr";
   mkIreeEmbeddedExample = callPackage ../../nix/packages/iree-embedded-example.nix {
-    inherit mkZigradZigPackage;
+    inherit mkZigApplication;
   };
-  emitter = mkZigradZigPackage {
-    configuration = emitterConfiguration.package;
+  emitter = mkZigApplication emitterConfiguration {
     mainProgram = "emit-pr";
     pname = "zigrad-example-basic-deployment-pr-emitter";
     src = source;
-    inherit sourceSubdir zigradSrc;
-    usePackagedZigrad = true;
+    inherit zigradSrc;
     zigArgs = ["-Dmode=emit_pr"];
     withRuntimeEnvironment = false;
   };
@@ -35,7 +32,7 @@ in
     compilerArguments ? [],
     compilerEnvironment ? {},
     runnerArguments ? [],
-    runnerExternalInputs ? runnerConfiguration.externalInputs.combined,
+    runnerExternalInputs ? runnerConfiguration.externalInputs,
     targetPkgs ? null,
     strip ? false,
     withRuntimeEnvironment ? false,
@@ -45,7 +42,7 @@ in
       name = "zigrad-example-basic-deployment-${name}";
       description = "Zigrad basic ${name} deployment example";
       vmfbName = "model.vmfb";
-      inherit source sourceSubdir zigradSrc program programName backend;
+      inherit source zigradSrc program programName backend;
       inherit compilerConfiguration compilerArguments compilerEnvironment;
       inherit runnerConfiguration runnerExternalInputs targetPkgs withRuntimeEnvironment;
       mainProgram = "basic-deployment";

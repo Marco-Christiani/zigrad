@@ -7,6 +7,7 @@
     repoRoot,
     ...
   }: let
+    buildConfigurations = config.zigrad.resolvedConfigurations;
     externalSources = import ../external-sources.nix {inherit pkgs;};
     cudaToolkit = config.packages.cuda-redist-dev;
     genClangd = pkgs.writeShellScriptBin "gen-clangd" ''
@@ -126,6 +127,119 @@
         python3 ${repoRoot + /scripts/test_dependency_planner.py}
         touch "$out"
       '';
+
+    buildConfigurationManifest = config.packages.zigrad-build-configurations;
+    buildConfigurationNames = builtins.attrNames buildConfigurations;
+    pog = pkgs.pog.pog;
+    zigradBuild = pog {
+      name = "zigrad-build";
+      description = "Inspect Zigrad build configurations";
+      runtimeInputs = [
+        pkgs.jq
+        pkgs.util-linux
+      ];
+      strict = true;
+      commands = [
+        {
+          name = "config";
+          description = "Inspect named build configurations";
+          commands = [
+            {
+              name = "list";
+              description = "List build configurations";
+              flags = [
+                {
+                  name = "all";
+                  short = "a";
+                  bool = true;
+                  description = "include internal configurations";
+                }
+              ];
+              script = helpers:
+                with helpers; ''
+                  include_all=false
+                  if ${flag "all"}; then
+                    include_all=true
+                  fi
+
+                  jq --raw-output --argjson include_all "$include_all" '
+                    def render:
+                      map(.provider + ":" + .target)
+                      | if length == 0 then "-" else join(",") end;
+
+                    ["CONFIG", "COMPILERS", "KERNEL PROVIDERS", "RUNTIMES"],
+                    (
+                      to_entries
+                      | map(select($include_all or .value.expose))
+                      | sort_by(.key)[]
+                      | [
+                          .key,
+                          (.value.compilers | render),
+                          (.value.kernelProviders | render),
+                          (.value.runtimes | render)
+                        ]
+                    )
+                    | @tsv
+                  ' ${buildConfigurationManifest} | column --table --separator $'\t'
+                '';
+            }
+            {
+              name = "show";
+              description = "Show one build configuration";
+              arguments = [
+                {
+                  name = "name";
+                  description = "configuration name";
+                  completion = pog.completions.values buildConfigurationNames;
+                }
+              ];
+              script = helpers:
+                with helpers; ''
+                  name="''${1:-}"
+                  [[ -n "$name" ]] || die "configuration name required" 2
+                  jq --exit-status --raw-output --arg name "$name" '
+                    def render($values):
+                      $values
+                      | map(.provider + ":" + .target)
+                      | if length == 0 then "-" else join(", ") end;
+                    def lines($values):
+                      if ($values | length) == 0 then "  -"
+                      else $values | map("  " + .) | join("\n")
+                      end;
+                    def inline($values):
+                      if ($values | length) == 0 then "-"
+                      else $values | join(", ")
+                      end;
+
+                    if has($name) then
+                      .[$name] as $config
+                      | [
+                          "name: " + $name,
+                          "description: " + $config.description,
+                          "exposed: " + ($config.expose | tostring),
+                          "compilers: " + render($config.compilers),
+                          "kernel providers: " + render($config.kernelProviders),
+                          "runtimes: " + render($config.runtimes),
+                          "demands:\n" + lines($config.demands),
+                          "resolved nodes:\n" + lines($config.resolved),
+                          "Zig dependency sets:\n" + lines($config.zigDependencySets),
+                          "Zig feature flags:\n" + lines($config.zigFeatureArgs),
+                          "runtime environment:",
+                          "  fixed: " + inline($config.runtimeEnvironment.fixed),
+                          "  defaulted: " + inline($config.runtimeEnvironment.defaults),
+                          "  prefixed: " + inline($config.runtimeEnvironment.prefixes)
+                        ]
+                      | join("\n")
+                    else
+                      error("unknown build configuration: " + $name)
+                    end
+                  ' ${buildConfigurationManifest}
+                '';
+            }
+          ];
+        }
+      ];
+    };
   in {
     packages = {
       check-dependency-snapshot = checkDependencySnapshot;
@@ -134,6 +248,7 @@
       gen-nvim = genNvim;
       plan-dependencies = planDependencies;
       update-cuda-catalog = updateCudaCatalog;
+      zigrad-build = zigradBuild;
     };
 
     apps = {
@@ -171,6 +286,11 @@
         type = "app";
         program = "${updateCudaCatalog}/bin/update-cuda-catalog";
         meta.description = "Update exact CUDA redistributable catalog entries";
+      };
+      zigrad-build = {
+        type = "app";
+        program = pkgs.lib.getExe zigradBuild;
+        meta.description = "Inspect Zigrad build configurations";
       };
     };
 

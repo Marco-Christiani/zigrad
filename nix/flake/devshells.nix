@@ -6,9 +6,9 @@
     pkgs,
     config,
     cudaCfg,
-    zigradBuildConfigurations,
     ...
   }: let
+    buildConfigurations = config.zigrad.resolvedConfigurations;
     externalSources = import ../external-sources.nix {inherit pkgs;};
     cudaPackages = pkgs.${cudaCfg.cudaPackagesAttr};
     gccHost = pkgs.${cudaCfg.gccHostAttr};
@@ -24,7 +24,7 @@
     '';
 
     mlirCppExampleDev = config.packages.zigrad-example-mlir-cpp-dev;
-    devCuda = zigradBuildConfigurations.dev-cuda;
+    devCuda = buildConfigurations."xla:cuda+iree:cpu+tvm:cuda+mirage:cuda";
 
     baseDevShellPkgs = with pkgs; [
       zig
@@ -39,6 +39,7 @@
       cmake
       ninja
       clangdWrapped
+      config.packages.zigrad-build
     ];
 
     lspShadowHook = ''
@@ -53,6 +54,7 @@
           "Zigrad development shell: $ZG_DEVSHELL" \
           "  targets: zig build -l" \
           "  core tests: zig build test --summary all" \
+          "  build configurations: zigrad-build config list" \
           "  configured build flags: $ZG_ZIG_BUILD_ARGS"
       fi
     '';
@@ -75,11 +77,14 @@
       ]);
 
     integrationEnv = configuration: let
-      externalInputs = configuration.externalInputs.combined;
-      externalInputsStr = toString externalInputs;
-      runtimeStr = toString configuration.externalInputs.runtime;
+      inherit (configuration) externalInputs runtimePolicy;
+      combinedInputs = externalInputs.combined;
+      externalInputsStr = toString combinedInputs;
+      runtimeStr = toString externalInputs.runtime;
     in
-      configuration.runtimeEnv
+      runtimePolicy.fixed
+      // runtimePolicy.defaults
+      // runtimePolicy.prefixes
       // {
         ZG_EXTERNAL_SDK_ROOT = externalInputsStr;
         ZG_RUNTIME_SDK_ROOT = runtimeStr;
@@ -98,14 +103,15 @@
       };
 
     runtimeLibraryHook = configuration: let
-      runtime = toString configuration.externalInputs.runtime;
+      inherit (configuration) externalInputs;
+      runtime = toString externalInputs.runtime;
       paths =
         [
           "${runtime}/lib"
           "${runtime}/runtime/sys/lib"
         ]
         ++ pkgs.lib.optional
-        (pkgs.lib.elem "cuda-driver" configuration.resolved)
+        configuration.needsCudaDriverRunpath
         "/run/opengl-driver/lib";
     in ''
       export LD_LIBRARY_PATH="${pkgs.lib.concatStringsSep ":" paths}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -127,11 +133,11 @@
 
       tvm-python = pkgs.mkShellNoCC {
         packages = baseDevShellPkgs ++ [tvmPython];
-        env = integrationEnv zigradBuildConfigurations.dev-cuda-tvm-python;
+        env = integrationEnv buildConfigurations.dev-cuda-tvm-python;
         shellHook =
           devShellHook "tvm-python"
           + lspShadowHook
-          + runtimeLibraryHook zigradBuildConfigurations.dev-cuda-tvm-python
+          + runtimeLibraryHook buildConfigurations.dev-cuda-tvm-python
           + ''
             export PYTHONPATH="$ZG_EXTERNAL_SDK_ROOT/python''${PYTHONPATH:+:$PYTHONPATH}"
 

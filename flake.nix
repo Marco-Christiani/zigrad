@@ -17,6 +17,11 @@
       url = "github:mitchellh/zig-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    pog = {
+      url = "github:jpetrucciani/pog/d5327fff16292e065d4263df10f20cd1f2688836";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs = inputs @ {
@@ -82,30 +87,15 @@
       nvshmemVersion = "3.2.5";
     };
 
-    # Build options threaded into external source derivations.
-    #
-    #  Project defaults avoid host-specific CPU and CUDA tuning. Named
-    #  configurations decide which packages are demanded. This attrset decides
-    #  how those external packages are compiled.
+    # Local overrides for external integration builds.
     #
     #  Per-user overrides live in ./local-build-cfg.nix (gitignored).
-    #  Copy ./local-build-cfg.example.nix to start. The repository direnv
-    #  environment loads this file. Direct Nix commands use the portable
-    #  defaults.
+    #  Copy ./local-build-cfg.example.nix to start. Impure evaluation from the
+    #  repository loads this file. Pure evaluation uses the portable defaults.
     #
-    #  See the Building section of the docs site for the full knob reference
-    #  and use-case recipes.
-    buildCfg = let
-      base = {
-        withDebugSymbols = false; # stripped, NDEBUG (production)
-        withNativeTuning = false; # portable: no -march=native
-        cudaArchitectures = []; # upstream fat list
-        enableLto = false; # opt-in via local override or release tooling
-        extraCxxFlags = [];
-        extraLdFlags = [];
-        extraBazelFlags = [];
-      };
-      # The repository direnv environment supplies PWD for this override.
+    # See the documentation on what is supported.
+    localBuildCfg = let
+      # impure eval supplies PWD for local cfg overrides
       pwd = builtins.getEnv "PWD";
       localFile =
         if pwd != ""
@@ -116,7 +106,7 @@
         then import localFile
         else {};
     in
-      base // localOverrides;
+      localOverrides;
   in
     flake-parts.lib.mkFlake {inherit inputs;} {
       systems = [
@@ -136,6 +126,7 @@
       };
 
       imports = [
+        ./nix/flake/configuration-options.nix
         ./nix/flake/integrations.nix
         ./nix/flake/examples.nix
         ./nix/flake/tools.nix
@@ -146,7 +137,10 @@
       perSystem = {system, ...}: let
         pkgs = import inputs.nixpkgs {
           inherit system;
-          overlays = [zigOverlay];
+          overlays = [
+            zigOverlay
+            inputs.pog.overlays.default
+          ];
           config = {
             allowUnfreePredicate = package:
               builtins.elem (inputs.nixpkgs.lib.getName package) [
@@ -174,9 +168,10 @@
             Update flake.nix cudaCfg or the nixpkgs lock.
         ''; {
           _module.args = {
-            inherit pkgs cudaCfg buildCfg;
+            inherit pkgs cudaCfg;
             repoRoot = ./.;
           };
+          zigrad.build = localBuildCfg;
           formatter = treefmt.config.build.wrapper;
           checks.formatting = treefmt.config.build.check inputs.self;
         };

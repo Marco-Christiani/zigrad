@@ -3,8 +3,8 @@
   pkgs,
   zigradSrc,
   version,
-  cudaArchitectures ? [],
   parts,
+  configurations,
 }: let
   featureDefaults = {
     withPjrt = false;
@@ -60,6 +60,7 @@
         parts.xlaProtos
       ];
       runtime = [];
+      zigDependencySets = ["protobuf"];
       features.withPjrt = true;
     };
 
@@ -213,221 +214,99 @@
       runtime = [parts.mirageAdapter];
       features.withMirage = true;
     };
+  };
 
-    "xla-cpu-execution" = {
-      requires = [
-        "pjrt-cpu"
-        "stablehlo-mlir"
-      ];
-      compile = [];
-      runtime = [];
-      features = {};
+  componentDemands = {
+    compilers = {
+      xla = {
+        cpu = ["stablehlo-mlir"];
+        cuda = ["stablehlo-mlir"];
+      };
+      iree = {
+        cpu = [
+          "iree-compiler-cpu"
+          "stablehlo-mlir"
+        ];
+        cuda = [
+          "iree-compiler-cuda"
+          "stablehlo-mlir"
+        ];
+      };
+      tvm = {
+        cpu = ["tvm-cpu"];
+        cuda = ["tvm-cuda"];
+      };
     };
 
-    "xla-cuda-execution" = {
-      requires = [
-        "pjrt-cuda"
-        "stablehlo-mlir"
-      ];
-      compile = [];
-      runtime = [];
-      features = {};
+    kernelProviders = {
+      tvm = {
+        cpu = ["tvm-cpu"];
+        cuda = ["tvm-cuda"];
+      };
+      tvm-python.cuda = ["tvm-python-cuda"];
+      mirage.cuda = ["mirage-cuda"];
     };
 
-    "iree-cpu-execution" = {
-      requires = [
-        "iree-compiler-cpu"
-        "iree-runtime-cpu"
-        "stablehlo-mlir"
-      ];
-      compile = [];
-      runtime = [];
-      features = {};
-    };
-
-    "iree-cuda-execution" = {
-      requires = [
-        "iree-compiler-cuda"
-        "iree-runtime-cuda"
-        "stablehlo-mlir"
-      ];
-      compile = [];
-      runtime = [];
-      features = {};
-    };
-
-    "tvm-xla-cpu-execution" = {
-      requires = [
-        "tvm-cpu"
-        "xla-cpu-execution"
-      ];
-      compile = [];
-      runtime = [];
-      features = {};
-    };
-
-    "tvm-xla-cuda-execution" = {
-      requires = [
-        "tvm-cuda"
-        "xla-cuda-execution"
-      ];
-      compile = [];
-      runtime = [];
-      features = {};
-    };
-
-    "mirage-xla-cuda-execution" = {
-      requires = [
-        "mirage-cuda"
-        "xla-cuda-execution"
-      ];
-      compile = [];
-      runtime = [];
-      features = {};
+    runtimes = {
+      pjrt = {
+        cpu = ["pjrt-cpu"];
+        cuda = ["pjrt-cuda"];
+      };
+      iree = {
+        cpu = ["iree-runtime-cpu"];
+        cuda = ["iree-runtime-cuda"];
+      };
+      tvm = {
+        cpu = ["tvm-cpu"];
+        cuda = ["tvm-cuda"];
+      };
     };
   };
 
-  definitions = {
-    zigrad = {
-      demands = [];
-      description = "Zigrad without external compiler or runtime integrations";
-      packageName = "zigrad";
-    };
+  componentName = component: "${component.provider}:${component.target}";
 
-    xla-cpu = {
-      demands = ["xla-cpu-execution"];
-      description = "Zigrad with the current XLA and PJRT CPU execution path";
-    };
+  demandsForComponent = role: component:
+    componentDemands.${role}.${component.provider}.${component.target}
+    or (throw "unknown Zigrad ${role} component '${componentName component}'");
 
-    xla-cuda = {
-      demands = ["xla-cuda-execution"];
-      description = "Zigrad with the current XLA and PJRT CUDA execution path";
-    };
+  demandsForConfiguration = definition:
+    normalize (
+      lib.concatMap (demandsForComponent "compilers") definition.compilers
+      ++ lib.concatMap (demandsForComponent "kernelProviders") definition.kernelProviders
+      ++ lib.concatMap (demandsForComponent "runtimes") definition.runtimes
+    );
 
-    iree-cpu = {
-      demands = ["iree-cpu-execution"];
-      description = "Zigrad with the current IREE CPU compile and execute path";
-    };
-
-    iree-cuda = {
-      demands = ["iree-cuda-execution"];
-      description = "Zigrad with the current IREE CUDA compile and execute path";
-    };
-
-    iree-cpu-runtime = {
-      demands = ["iree-runtime-cpu"];
-      description = "Zigrad with the IREE CPU runtime";
-    };
-
-    iree-cuda-runtime = {
-      demands = ["iree-runtime-cuda"];
-      description = "Zigrad with the IREE CUDA runtime";
-    };
-
-    xla-iree-cpu = {
-      demands = [
-        "iree-cpu-execution"
-        "xla-cpu-execution"
-      ];
-      description = "Zigrad with interchangeable XLA and IREE CPU execution paths";
-    };
-
-    xla-iree-cuda = {
-      demands = [
-        "iree-cuda-execution"
-        "xla-cuda-execution"
-      ];
-      description = "Zigrad with interchangeable XLA and IREE CUDA execution paths";
-    };
-
-    tvm-cpu = {
-      demands = ["tvm-cpu"];
-      description = "Zigrad with standalone TVM CPU tuning and execution";
-    };
-
-    tvm-cuda = {
-      demands = ["tvm-cuda"];
-      description = "Zigrad with standalone TVM CUDA tuning and execution";
-    };
-
-    tvm-xla-cpu = {
-      demands = ["tvm-xla-cpu-execution"];
-      description = "Zigrad with TVM CPU specialization on the current XLA path";
-    };
-
-    tvm-xla-cuda = {
-      demands = ["tvm-xla-cuda-execution"];
-      description = "Zigrad with TVM CUDA specialization on the current XLA path";
-    };
-
-    mirage-xla-cuda = {
-      demands = ["mirage-xla-cuda-execution"];
-      description = "Zigrad with Mirage CUDA specialization on the current XLA path";
-    };
-
-    dev-cuda = {
-      demands = [
-        "iree-cpu-execution"
-        "mirage-xla-cuda-execution"
-        "tvm-xla-cuda-execution"
-      ];
-      description = "Broad Zigrad development build with every current CUDA integration";
-    };
-
-    dev-cuda-tvm-python = {
-      demands = [
-        "iree-cpu-execution"
-        "mirage-xla-cuda-execution"
-        "tvm-python-cuda"
-      ];
-      description = "Broad CUDA development build with TVM Python bindings";
-      expose = false;
-    };
-
-    example-benchmark = {
-      demands = [
-        "iree-cpu-execution"
-        "tvm-xla-cuda-execution"
-      ];
-      description = "Dependencies for the benchmark example";
-      expose = false;
-      packageName = "zigrad-example-benchmark-dependencies";
-    };
-  };
+  duplicateComponentFor = definition:
+    lib.findFirst
+    (duplicate: duplicate != null)
+    null
+    (lib.concatMap
+      (role: let
+        names = map componentName definition.${role};
+      in
+        map
+        (name:
+          if lib.count (candidate: candidate == name) names > 1
+          then "${role} contains '${name}' more than once"
+          else null)
+        names)
+      [
+        "compilers"
+        "kernelProviders"
+        "runtimes"
+      ]);
 
   nodeFor = name:
     nodes.${name}
     or (throw "unknown Zigrad build dependency '${name}'");
 
-  normalize = names:
-    lib.sort builtins.lessThan (lib.unique names);
+  dependencyGraph = import ../lib/dependency-graph.nix {
+    inherit lib nodes;
+  };
 
-  closeDemands = demands: let
-    current = normalize demands;
-    expanded = normalize (
-      current
-      ++ lib.concatMap (name: (nodeFor name).requires or []) current
-    );
-  in
-    if expanded == current
-    then current
-    else closeDemands expanded;
+  inherit (dependencyGraph) normalize;
 
-  conflictFor = resolved:
-    lib.findFirst
-    (entry: entry != null)
-    null
-    (lib.concatMap
-      (name:
-        map
-        (other:
-          if lib.elem other resolved
-          then "${name} conflicts with ${other}"
-          else null)
-        ((nodeFor name).conflicts or []))
-      resolved);
-
-  mkExternalInputs = packageName: resolved: let
+  mkExternalInputs = pname: resolved: let
     compilePaths = lib.unique (
       lib.concatMap (node: (nodeFor node).compile or []) resolved
     );
@@ -436,17 +315,17 @@
     );
   in rec {
     compile = pkgs.symlinkJoin {
-      name = "${packageName}-external-compile-inputs";
+      name = "${pname}-external-compile-inputs";
       paths = compilePaths;
     };
 
     runtime = pkgs.symlinkJoin {
-      name = "${packageName}-external-runtime-inputs";
+      name = "${pname}-external-runtime-inputs";
       paths = runtimePaths;
     };
 
     combined = pkgs.symlinkJoin {
-      name = "${packageName}-external-inputs";
+      name = "${pname}-external-inputs";
       paths = [
         compile
         runtime
@@ -459,17 +338,41 @@
     inherit compilePaths runtimePaths;
   };
 
+  publicNamePattern = "[a-z][a-z0-9-]*:[a-z][a-z0-9-]*(\\+[a-z][a-z0-9-]*:[a-z][a-z0-9-]*)*";
+
   mkConfiguration = name: definition: let
-    resolved = closeDemands definition.demands;
-    conflict = conflictFor resolved;
-    packageName = definition.packageName or "zigrad-${name}";
-    externalInputs = mkExternalInputs packageName resolved;
+    namedComponents = lib.unique (
+      map componentName (definition.compilers ++ definition.kernelProviders)
+    );
+    expectedPublicName = lib.concatStringsSep "+" namedComponents;
+    demands = demandsForConfiguration definition;
+    resolved = dependencyGraph.close demands;
+    conflict = dependencyGraph.conflictFor resolved;
+    duplicateComponent = duplicateComponentFor definition;
+    validPublicName =
+      !definition.expose
+      || (
+        if namedComponents == []
+        then name == "zigrad"
+        else
+          name
+          == expectedPublicName
+          && builtins.match publicNamePattern name != null
+      );
+    pname =
+      if definition.pname != null
+      then definition.pname
+      else "zigrad-${lib.replaceStrings [":" "+"] ["-" "-"] name}";
+    externalInputs = mkExternalInputs pname resolved;
     has = node: lib.elem node resolved;
     featureArgs =
       lib.foldl'
       (features: node: features // ((nodeFor node).features or {}))
       featureDefaults
       resolved;
+    zigDependencySets = lib.unique (
+      lib.concatMap (node: (nodeFor node).zigDependencySets or []) resolved
+    );
     zigFeatureArgs = [
       "-Dpjrt=${lib.boolToString featureArgs.withPjrt}"
       "-Dmlir=${lib.boolToString featureArgs.withMlir}"
@@ -520,21 +423,23 @@
     runtimeEnvPrefixes = lib.optionalAttrs (has "pjrt-cuda") {
       XLA_FLAGS = "--xla_gpu_cuda_data_dir=${externalInputs.runtime}/runtime/nvidia";
     };
-    effectiveRuntimeEnv =
-      runtimeEnv
-      // runtimeEnvPrefixes;
+    runtimePolicy = {
+      fixed = runtimeEnv;
+      defaults = {};
+      prefixes = runtimeEnvPrefixes;
+    };
+    needsCudaDriverRunpath = has "cuda-driver";
     package = pkgs.callPackage ../packages/zigrad.nix {
       inherit
-        packageName
         runtimeEnv
         runtimeEnvPrefixes
         version
         zigradSrc
         ;
+      inherit pname;
       compileInputs = externalInputs.compile;
-      inherit zigFeatureArgs;
-      needsPjrtDependencies = featureArgs.withPjrt;
-      needsCudaDriverRunpath = has "cuda-driver";
+      inherit zigDependencySets zigFeatureArgs;
+      inherit needsCudaDriverRunpath;
       runtimeLibraryPaths = lib.optionals (externalInputs.runtimePaths != []) [
         "${externalInputs.runtime}/lib"
         "${externalInputs.runtime}/runtime/sys/lib"
@@ -545,51 +450,44 @@
         else externalInputs.runtime;
       optimize = "ReleaseFast";
       passthru = {
-        configuration = {
-          inherit
-            compatibility
-            name
-            packageName
-            resolved
-            zigFeatureArgs
-            zigFeatureFlags
-            ;
-          runtimeEnv = effectiveRuntimeEnv;
-          runtimeEnvPolicy = {
-            fixed = runtimeEnv;
-            defaults = {};
-            prefixes = runtimeEnvPrefixes;
-          };
-          inherit (definition) demands;
-        };
-        externalInputs = externalInputs.combined;
+        inherit
+          externalInputs
+          needsCudaDriverRunpath
+          runtimePolicy
+          zigDependencySets
+          ;
       };
     };
   in
+    assert lib.assertMsg validPublicName
+    "Zigrad public configuration '${name}' must be named '${
+      if namedComponents == []
+      then "zigrad"
+      else expectedPublicName
+    }' from its compiler and kernel-provider components";
+    assert lib.assertMsg (duplicateComponent == null)
+    "Zigrad build configuration '${name}' is invalid: ${duplicateComponent}";
     assert lib.assertMsg (conflict == null)
     "Zigrad build configuration '${name}' is invalid: ${conflict}"; {
       inherit
         compatibility
+        demands
+        externalInputs
         featureArgs
         name
+        needsCudaDriverRunpath
         package
-        packageName
+        pname
         resolved
-        externalInputs
+        runtimePolicy
+        zigDependencySets
         zigFeatureArgs
         zigFeatureFlags
         ;
-      runtimeEnv = effectiveRuntimeEnv;
-      runtimeEnvPolicy = {
-        fixed = runtimeEnv;
-        defaults = {};
-        prefixes = runtimeEnvPrefixes;
-      };
-      inherit (definition) demands description;
-      expose = definition.expose or true;
+      inherit (definition) compilers description expose kernelProviders runtimes;
     };
 
-  configurations = lib.mapAttrs mkConfiguration definitions;
+  resolvedConfigurations = lib.mapAttrs mkConfiguration configurations;
 
   manifest =
     lib.mapAttrs
@@ -597,20 +495,30 @@
       inherit
         (configuration)
         compatibility
+        compilers
         demands
         description
         expose
-        packageName
+        kernelProviders
+        pname
         resolved
-        zigFeatureFlags
+        runtimes
+        zigDependencySets
+        zigFeatureArgs
         ;
+      runtimeEnvironment = {
+        fixed = builtins.attrNames configuration.runtimePolicy.fixed;
+        defaults = builtins.attrNames configuration.runtimePolicy.defaults;
+        prefixes = builtins.attrNames configuration.runtimePolicy.prefixes;
+      };
     })
-    configurations;
-in {
-  inherit
-    configurations
-    definitions
-    manifest
-    nodes
-    ;
-}
+    resolvedConfigurations;
+in
+  assert lib.assertMsg (dependencyGraph.invalidReference == null)
+  "Zigrad dependency graph is invalid: ${dependencyGraph.invalidReference}"; {
+    inherit
+      manifest
+      nodes
+      resolvedConfigurations
+      ;
+  }

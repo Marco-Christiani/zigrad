@@ -7,9 +7,7 @@
   zigAutodocDocs,
   zigradSrc,
 }: let
-  zigDeps = callPackage ./zig-dependencies.nix {
-    withPjrt = false;
-  };
+  zigDeps = callPackage ./zig-dependencies.nix {};
 in
   stdenvNoCC.mkDerivation {
     pname = "zigrad-autodoc";
@@ -34,13 +32,6 @@ in
         -j"$NIX_BUILD_CORES" \
         -Doptimize=ReleaseFast \
         -Dtarget=native-native-gnu \
-        -Dpjrt=false \
-        -Dmlir=false \
-        -Dtvm=false \
-        -Dmirage=false \
-        -Diree=false \
-        -Dnvrtc=false \
-        -Dcuda-runtime=false \
         --system ${zigDeps} \
         --prefix "$out"
 

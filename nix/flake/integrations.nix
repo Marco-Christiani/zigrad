@@ -11,16 +11,16 @@
 in {
   perSystem = {
     pkgs,
+    config,
     cudaCfg,
-    buildCfg,
     repoRoot,
     ...
   }: let
     # Shared settings for source builds that can demand long-running derivations.
     #
-    # Definitions and defaults live in flake.nix.
+    # Defaults and validation live in configuration-options.nix.
     inherit
-      (buildCfg)
+      (config.zigrad.build)
       withDebugSymbols
       withNativeTuning
       cudaArchitectures
@@ -175,14 +175,15 @@ in {
     };
     inherit (iree) ireeCompilerCpu ireeCompilerCuda ireeLlvm ireeRuntimeCpu ireeRuntimeCuda;
 
+    configurationDefinitions = import ./configuration-definitions.nix;
     buildGraph = import ./build-configurations.nix {
       inherit
         lib
         pkgs
         zigradSrc
         ;
+      configurations = config.zigrad.configurations;
       version = zigradVersion;
-      inherit cudaArchitectures;
       parts = {
         inherit
           cudaRuntime
@@ -208,18 +209,18 @@ in {
       };
     };
 
-    buildConfigurations = buildGraph.configurations;
+    buildConfigurations = buildGraph.resolvedConfigurations;
     configurationPackages =
       lib.concatMapAttrs
-      (_: configuration:
+      (name: configuration:
         lib.optionalAttrs configuration.expose {
-          "${configuration.packageName}" = configuration.package;
+          "${name}" = configuration.package;
         })
       buildConfigurations;
     configurationApps =
       lib.mapAttrs'
-      (_: configuration:
-        lib.nameValuePair configuration.packageName {
+      (name: configuration:
+        lib.nameValuePair name {
           type = "app";
           program = "${configuration.package}/bin/zigrad";
           meta.description = configuration.description;
@@ -229,7 +230,10 @@ in {
       builtins.toJSON buildGraph.manifest
     );
   in {
-    _module.args.zigradBuildConfigurations = buildConfigurations;
+    zigrad = {
+      configurations = configurationDefinitions;
+      resolvedConfigurations = buildConfigurations;
+    };
     _module.args.zigradCudaArchitectures = cudaArchitectures;
     _module.args.zigradIree = iree;
 
@@ -244,7 +248,6 @@ in {
         mirage-formal-verifier = mirageRustLibs.formal_verifier;
         zigrad-build-configurations = buildConfigurationManifest;
         zigrad-autodoc = zigradAutodoc;
-        zigrad-autodoc-candidate = zigradAutodocCandidate;
         zigrad-autodoc-preview = zigradAutodocPreview;
         inherit llvm tvm;
         tvm-dev = tvm.dev;
@@ -263,6 +266,9 @@ in {
         iree-runtime-cpu = ireeRuntimeCpu;
         iree-runtime-cuda = ireeRuntimeCuda;
         pjrt-headers = pjrtHeaders;
+      }
+      // lib.optionalAttrs (zigradRevision != null) {
+        zigrad-autodoc-candidate = zigradAutodocCandidate;
       };
 
     apps = configurationApps;

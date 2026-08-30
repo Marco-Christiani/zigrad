@@ -11,32 +11,41 @@ in {
     src,
     sourceSubdir ? ".",
   }:
-    pkgs.callPackage ../packages/zigrad-zig-package.nix {
-      inherit
-        configuration
-        mainProgram
-        pname
-        src
-        sourceSubdir
-        zigradSrc
-        ;
-    };
+    pkgs.callPackage ../packages/zigrad-application.nix (
+      {
+        inherit
+          (configuration)
+          externalInputs
+          needsCudaDriverRunpath
+          runtimePolicy
+          zigDependencySets
+          ;
+      }
+      // {
+        inherit
+          mainProgram
+          pname
+          src
+          sourceSubdir
+          zigradSrc
+          ;
+      }
+    );
 
   mkDevShell = {
     pkgs,
     configuration,
   }: let
     inherit (pkgs) lib;
-    externalInputs = configuration.externalInputs;
+    inherit (configuration) externalInputs runtimePolicy;
     runtimeInputs = externalInputs.runtime;
-    runtimePolicy = configuration.configuration.runtimeEnvPolicy;
     runtimeLibraryPaths =
       [
         "${runtimeInputs}/lib"
         "${runtimeInputs}/runtime/sys/lib"
       ]
       ++ lib.optional
-      (lib.elem "cuda-driver" configuration.configuration.resolved)
+      configuration.needsCudaDriverRunpath
       "/run/opengl-driver/lib";
     defaultHooks =
       lib.mapAttrsToList
@@ -58,15 +67,14 @@ in {
         pkgs.stdenv.cc
         pkgs.zig
         pkgs.zls
-        externalInputs
+        externalInputs.combined
       ];
 
       env =
         runtimePolicy.fixed
         // {
-          ZG_EXTERNAL_SDK_ROOT = toString externalInputs;
+          ZG_EXTERNAL_SDK_ROOT = toString externalInputs.combined;
           ZG_RUNTIME_SDK_ROOT = toString runtimeInputs;
-          ZG_ZIG_BUILD_ARGS = configuration.configuration.zigFeatureFlags;
         };
 
       shellHook = lib.concatStrings (

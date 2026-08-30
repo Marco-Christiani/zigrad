@@ -54,7 +54,7 @@ class CompatibilityEntry(TypedDict):
 
 
 class BuildConfiguration(TypedDict):
-    packageName: str
+    pname: str
     resolved: list[str]
     compatibility: list[CompatibilityEntry]
 
@@ -198,7 +198,7 @@ def read_manifest(path: Path) -> BuildManifest:
             )
 
         manifest[name] = {
-            "packageName": _read_string(configuration, "packageName", name),
+            "pname": _read_string(configuration, "pname", name),
             "resolved": _read_string_list(configuration, "resolved", name),
             "compatibility": compatibility,
         }

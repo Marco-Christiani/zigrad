@@ -6,75 +6,75 @@
     pkgs,
     config,
     repoRoot,
-    zigradBuildConfigurations,
     zigradCudaArchitectures,
     zigradIree,
     ...
   }: let
     inherit (pkgs) lib;
+    buildConfigurations = config.zigrad.resolvedConfigurations;
     fs = lib.fileset;
     zigradSrc = import ../helpers/source-filter.nix {
       inherit lib;
       root = repoRoot;
     };
-    zigExampleSrc = name:
+    zigExampleSrc = name: let
+      exampleRoot = repoRoot + "/examples/${name}";
+    in
       fs.toSource {
-        root = repoRoot;
-        fileset = fs.unions [
-          (repoRoot + /build.zig)
-          (repoRoot + /build.zig.zon)
-          (repoRoot + /assets)
-          (repoRoot + /src)
-          (repoRoot + /tools)
-          (repoRoot + "/examples/${name}")
-        ];
+        root = exampleRoot;
+        fileset = exampleRoot;
       };
-    mkZigradZigPackage = args:
-      pkgs.callPackage ../packages/zigrad-zig-package.nix args;
+    mkZigApplication = configuration: args:
+      pkgs.callPackage ../packages/zigrad-application.nix (
+        {
+          inherit
+            (configuration)
+            externalInputs
+            needsCudaDriverRunpath
+            runtimePolicy
+            zigDependencySets
+            ;
+        }
+        // args
+      );
     mkZigExample = {
       name,
       mainProgram,
-      profile,
+      configuration,
       zigArgs ? [],
     }:
-      mkZigradZigPackage {
-        configuration = profile.package;
+      mkZigApplication configuration {
         inherit mainProgram;
         pname = "zigrad-example-${name}";
         src = zigExampleSrc name;
-        sourceSubdir = "examples/${name}";
-        usePackagedZigrad = true;
         inherit zigradSrc;
         inherit zigArgs;
       };
     benchmark = mkZigExample {
       name = "benchmark";
       mainProgram = "benchmark";
-      profile = zigradBuildConfigurations.example-benchmark;
+      configuration = buildConfigurations.example-benchmark;
     };
     mnist = mkZigExample {
       name = "mnist";
       mainProgram = "mnist";
-      profile = zigradBuildConfigurations.xla-iree-cpu;
+      configuration = buildConfigurations."xla:cpu+iree:cpu";
     };
     llamaTraining = mkZigExample {
       name = "llama-training";
       mainProgram = "llama-training";
-      profile = zigradBuildConfigurations.xla-iree-cuda;
+      configuration = buildConfigurations."xla:cuda+iree:cuda";
     };
     cifar10Train = mkZigExample {
       name = "cifar10-lifecycle";
       mainProgram = "cifar10-train";
-      profile = zigradBuildConfigurations.xla-cuda;
+      configuration = buildConfigurations."xla:cuda";
       zigArgs = ["-Dmode=train"];
     };
-    cifar10Tests = mkZigradZigPackage {
-      configuration = zigradBuildConfigurations.zigrad.package;
+    cifar10Tests = mkZigApplication buildConfigurations.zigrad {
       mainProgram = "cifar10-init";
       pname = "zigrad-example-cifar10-tests";
       src = zigExampleSrc "cifar10-lifecycle";
-      sourceSubdir = "examples/cifar10-lifecycle";
-      usePackagedZigrad = true;
       inherit zigradSrc;
       zigArgs = ["-Dmode=init"];
       runTests = true;
@@ -85,9 +85,9 @@
     ireeCudaArchitecture = lib.optionalString hasIreeCudaArchitecture (builtins.head zigradCudaArchitectures);
     basicDeploymentSource = zigExampleSrc "basic-deployment";
     mkBasicDeployment = pkgs.callPackage ../../examples/basic-deployment/package.nix {
-      inherit mkZigradZigPackage;
+      inherit mkZigApplication;
       source = basicDeploymentSource;
-      emitterConfiguration = zigradBuildConfigurations.zigrad;
+      emitterConfiguration = buildConfigurations.zigrad;
       inherit zigradSrc;
     };
     embeddedElfCompilerArguments = [
@@ -100,8 +100,8 @@
     basicDeploymentCpu = mkBasicDeployment {
       name = "cpu";
       backend = "llvm-cpu";
-      compilerConfiguration = zigradBuildConfigurations.iree-cpu;
-      runnerConfiguration = zigradBuildConfigurations.iree-cpu-runtime;
+      compilerConfiguration = buildConfigurations."iree:cpu";
+      runnerConfiguration = buildConfigurations.iree-cpu-runtime;
       compilerArguments = embeddedElfCompilerArguments;
       compilerEnvironment.IREE_LLVM_EMBEDDED_LINKER_PATH = lib.getExe' config.packages.iree-llvm "ld.lld";
       canExecute = true;
@@ -109,8 +109,8 @@
     basicDeploymentCuda = mkBasicDeployment {
       name = "cuda-sm_${ireeCudaArchitecture}";
       backend = "cuda";
-      compilerConfiguration = zigradBuildConfigurations.iree-cuda;
-      runnerConfiguration = zigradBuildConfigurations.iree-cuda-runtime;
+      compilerConfiguration = buildConfigurations."iree:cuda";
+      runnerConfiguration = buildConfigurations.iree-cuda-runtime;
       compilerArguments = ["--iree-cuda-target=sm_${ireeCudaArchitecture}"];
       runnerArguments = [
         "-Druntime=registered"
@@ -125,19 +125,20 @@
       paths = [aarch64IreeRuntime];
     };
     aarch64RuntimeInputs = aarch64Pkgs.stdenv.cc.libc;
-    aarch64ExternalInputs = pkgs.symlinkJoin {
+    aarch64CombinedInputs = pkgs.symlinkJoin {
       name = "zigrad-basic-deployment-aarch64-external-inputs";
       paths = [aarch64IreeInputs aarch64RuntimeInputs];
-      passthru = {
-        compile = aarch64IreeInputs;
-        runtime = aarch64RuntimeInputs;
-      };
+    };
+    aarch64ExternalInputs = {
+      compile = aarch64IreeInputs;
+      runtime = aarch64RuntimeInputs;
+      combined = aarch64CombinedInputs;
     };
     basicDeploymentCpuAarch64 = mkBasicDeployment {
       name = "cpu-aarch64";
       backend = "llvm-cpu";
-      compilerConfiguration = zigradBuildConfigurations.iree-cpu;
-      runnerConfiguration = zigradBuildConfigurations.iree-cpu-runtime;
+      compilerConfiguration = buildConfigurations."iree:cpu";
+      runnerConfiguration = buildConfigurations.iree-cpu-runtime;
       targetPkgs = aarch64Pkgs;
       runnerExternalInputs = aarch64ExternalInputs;
       compilerArguments =
@@ -152,16 +153,16 @@
     };
     cifar10Source = zigExampleSrc "cifar10-lifecycle";
     mkCifar10Deployment = pkgs.callPackage ../../examples/cifar10-lifecycle/package.nix {
-      inherit mkZigradZigPackage;
+      inherit mkZigApplication;
       source = cifar10Source;
-      emitterConfiguration = zigradBuildConfigurations.zigrad;
+      emitterConfiguration = buildConfigurations.zigrad;
       inherit zigradSrc;
     };
     cifar10Cpu = mkCifar10Deployment {
       name = "cpu";
       backend = "llvm-cpu";
-      compilerConfiguration = zigradBuildConfigurations.iree-cpu;
-      runnerConfiguration = zigradBuildConfigurations.iree-cpu-runtime;
+      compilerConfiguration = buildConfigurations."iree:cpu";
+      runnerConfiguration = buildConfigurations.iree-cpu-runtime;
       compilerArguments = embeddedElfCompilerArguments;
       compilerEnvironment.IREE_LLVM_EMBEDDED_LINKER_PATH = lib.getExe' config.packages.iree-llvm "ld.lld";
       canExecute = true;
@@ -169,8 +170,8 @@
     cifar10CpuAarch64 = mkCifar10Deployment {
       name = "cpu-aarch64";
       backend = "llvm-cpu";
-      compilerConfiguration = zigradBuildConfigurations.iree-cpu;
-      runnerConfiguration = zigradBuildConfigurations.iree-cpu-runtime;
+      compilerConfiguration = buildConfigurations."iree:cpu";
+      runnerConfiguration = buildConfigurations.iree-cpu-runtime;
       targetPkgs = aarch64Pkgs;
       runnerExternalInputs = aarch64ExternalInputs;
       compilerArguments =

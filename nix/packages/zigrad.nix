@@ -9,22 +9,21 @@
   zigradSrc,
   compileInputs,
   runtimeInputs ? null,
-  packageName ? "zigrad",
+  pname ? "zigrad",
   runtimeEnv ? {},
   runtimeEnvDefaults ? {},
   runtimeEnvPrefixes ? {},
   runtimeLibraryPaths ? [],
   passthru ? {},
   zigFeatureArgs ? [],
-  needsPjrtDependencies ? false,
+  zigDependencySets ? [],
   needsCudaDriverRunpath ? false,
   version ? "dev",
   optimize ? "ReleaseFast",
   runTests ? false,
 }: let
-  pname = packageName;
   zigDeps = callPackage ./zig-dependencies.nix {
-    withPjrt = needsPjrtDependencies;
+    requestedSets = zigDependencySets;
   };
   featureFlags = lib.concatStringsSep " " ([
       "-Dversion=${version}"
@@ -94,20 +93,7 @@ in
       runHook postConfigure
     '';
 
-    buildPhase = ''
-      runHook preBuild
-      TERM=dumb zig build \
-        -j"$NIX_BUILD_CORES" \
-        -Doptimize=${optimize} \
-        -Dsdk=${compileInputs} \
-        -Dtarget=native-native-gnu \
-        -Dinstall-runtime-link=false \
-        ${featureFlags} \
-        -freference-trace=10 \
-        --system ${zigDeps} \
-        --verbose
-      runHook postBuild
-    '';
+    dontBuild = true;
 
     checkPhase = ''
       runHook preCheck

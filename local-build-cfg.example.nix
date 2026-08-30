@@ -1,13 +1,14 @@
-# Per-user overrides for flake.nix's buildCfg. Copy this file to
+# Per-user overrides for the `zigrad.build` flake-parts option. Copy this file to
 # local-build-cfg.nix (gitignored) and adjust for your machine.
 #
-# Each key listed here overrides the project default in flake.nix.
+# Each key listed here overrides the project default in
+# nix/flake/configuration-options.nix.
 # Omit a key to inherit the project default. The defaults are
 # deliberately portable. Your local file opts into machine-specific
 # optimizations.
 #
-# The repository direnv environment loads this file. Direct Nix commands use
-# the portable defaults.
+# Impure Nix evaluation from the repository loads this file. Pure evaluation
+# uses the portable defaults.
 #
 # Full knob reference: docs site, "Building / Optimization knobs".
 {
@@ -45,7 +46,7 @@
   #
   # Retain DWARF, build with RelWithDebInfo, and do not strip. Useful for
   # GDB-stepping into integration libraries such as libtvm.so and
-  #  libIREECompiler.so.
+  #  libIREECompiler.so. false (default) means NDEBUG.
   #
   # withDebugSymbols = true;
 
