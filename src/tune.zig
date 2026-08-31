@@ -1,412 +1,718 @@
-//! Kernel tuning for the KP system.
+//! Kernel candidate compilation, measurement, and resolution.
 //!
-//! Walks a PR program for provider-request functions, invokes providers to compile
-//!  each candidate, and records selections in a `KernelStore`.
-//! Provider dispatch entries are registered in a `DispatchRegistry` for
-//!  execute-time resolution.
+//! Candidate collection retains every compiled implementation and its
+//!  measurement. A resolver sees the complete collection before final
+//!  selections enter a `KernelStore`.
 //!
-//! This decouples tuning from kernelization. Kernelization consults a
-//!  pre-computed store and does not call providers.
-//!
-//! Usage:
 //! ```zig
-//! var result = try tune(io, allocator, &program, providers, .{
-//!     .device = selected_device,
-//!     .evaluator = evaluator,
+//! const zg = @import("zigrad");
+//!
+//! var store = try zg.tune.tune(io, allocator, &program, providers, .{
+//!     .device = target,
+//!     .candidates = &extracted,
+//!     .measurer = measurer,
 //! });
-//! defer result.deinit();
-//! // Pass `result.store` to the PR kernelization operation.
-//! // Pass `result.dispatch_registry` to the execution integration.
+//! defer store.deinit();
+//!
+//! var kernelize = zg.pr.transform.kernelize.KernelizePass{
+//!     .store = &store,
+//!     .candidates = &extracted,
+//!     .device = target,
+//! };
+//! _ = try kernelize.run(&program, &context);
 //! ```
+
 const std = @import("std");
 const device = @import("device.zig");
 const fingerprint = @import("pr/analysis/fingerprint.zig");
 const pr = @import("pr/pr.zig");
 const kernel = @import("kernel.zig");
+const measurement = @import("tune/measurer.zig");
 
 const log = std.log.scoped(.@"zg/tune");
 
-/// Options for the tuning process.
-pub const TuneOpts = struct {
-    /// Print a summary table of kernel selections after completion.
-    dump_results: bool = false,
-    /// Device for provider target resolution.
-    device: device.Device,
+pub const Measurement = measurement.Measurement;
+pub const Sample = measurement.Sample;
+pub const MeasurementError = measurement.Error;
+pub const Measurer = measurement.Measurer;
+pub const Executable = measurement.Executable;
+pub const ExecutableFactory = measurement.ExecutableFactory;
+pub const ExecutableMeasurer = measurement.ExecutableMeasurer;
+pub const InputGenerator = measurement.InputGenerator;
 
-    /// Evaluates the original callable and compiled provider candidates.
+/// Compiled implementations and measurements for one candidate boundary.
+pub const EvaluatedCandidate = struct {
+    /// Candidate boundary whose slices are borrowed from the extracted collection.
+    boundary: kernel.CandidateRegion,
+    /// Extracted callable borrowed from the PR program.
+    callable: pr.Function,
+    /// Provider artifacts owned by the enclosing `EvaluatedCandidates`.
     ///
-    /// A null evaluator retains the original callable. Compilation alone does
-    ///  not establish that a provider candidate is preferable.
-    evaluator: ?Evaluator = null,
-};
+    /// Provider-name bytes remain borrowed from `boundary`.
+    implementations: []kernel.ProviderCandidate,
+    /// Measurements aligned with `implementations`.
+    measurements: []Measurement,
 
-/// Candidate selected by an evaluator.
-pub const Evaluation = struct {
-    candidate: union(enum) {
-        original,
-        provider: usize,
-    },
-    /// Evidence summary copied into the kernel store.
-    reason: []const u8,
-    /// Aggregate timings when the decision came from target measurement.
-    timing: ?kernel.TimingEvidence = null,
-};
-
-/// Failures produced while comparing executable candidates.
-pub const EvaluationError = error{
-    EvaluationFailed,
-    InvalidEvaluation,
-} || std.mem.Allocator.Error;
-
-/// Compiled provider implementation available to an evaluator.
-pub const AvailableCandidate = struct {
-    provider_name: []const u8,
-    artifact: kernel.Artifact,
-};
-
-/// Type-erased selection among an original callable and provider artifacts.
-///
-/// The implementation supplies the evidence and policy supporting its result.
-pub const Evaluator = struct {
-    ptr: *anyopaque,
-    evaluate_fn: *const fn (
-        ptr: *anyopaque,
-        func: pr.Function,
-        candidates: []const AvailableCandidate,
-        selected_device: device.Device,
-        allocator: std.mem.Allocator,
-    ) EvaluationError!Evaluation,
-
-    /// Compare both executable implementations of one callable.
-    pub fn evaluate(
-        self: Evaluator,
-        func: pr.Function,
-        candidates: []const AvailableCandidate,
-        selected_device: device.Device,
-        allocator: std.mem.Allocator,
-    ) EvaluationError!Evaluation {
-        return try self.evaluate_fn(
-            self.ptr,
-            func,
-            candidates,
-            selected_device,
-            allocator,
-        );
+    fn deinit(self: *EvaluatedCandidate, allocator: std.mem.Allocator) void {
+        for (self.implementations) |*implementation|
+            implementation.artifact.deinit(allocator);
+        allocator.free(self.implementations);
+        measurement.deinit_measurements(allocator, self.measurements);
+        self.* = undefined;
     }
 };
 
-/// Executable implementation passed to a measurement callback.
-pub const MeasurableCandidate = union(enum) {
-    original,
-    provider: *const AvailableCandidate,
-};
+/// Complete provider evidence retained until an explicit resolution step.
+pub const EvaluatedCandidates = struct {
+    /// Allocator owning entries, artifacts, and measurements.
+    allocator: std.mem.Allocator,
+    /// Evaluated candidates in extracted-candidate order.
+    entries: []EvaluatedCandidate,
 
-/// Comparable result returned by a target-specific measurement callback.
-pub const Measurement = struct {
-    elapsed_ns: u64,
-    /// Whether this implementation matched the original callable's results.
-    correct: bool,
-};
-
-/// Selects the fastest correct candidate from target measurements.
-///
-/// The callback owns warmup, repeated sampling, synchronization, input choice,
-///  and aggregation. Every returned duration must cover the same callable
-///  boundary under the same measurement policy.
-pub const MeasuredEvaluator = struct {
-    ptr: *anyopaque,
-    measure_fn: *const fn (
-        ptr: *anyopaque,
-        func: pr.Function,
-        candidate: MeasurableCandidate,
-        selected_device: device.Device,
-        allocator: std.mem.Allocator,
-    ) EvaluationError!Measurement,
-
-    /// Return the evaluator interface used by `tune`.
-    pub fn interface(self: *MeasuredEvaluator) Evaluator {
-        return .{
-            .ptr = @ptrCast(self),
-            .evaluate_fn = evaluate,
-        };
+    /// Release compiled artifacts, measurements, and entry storage.
+    pub fn deinit(self: *EvaluatedCandidates) void {
+        for (self.entries) |*entry| entry.deinit(self.allocator);
+        self.allocator.free(self.entries);
+        self.* = undefined;
     }
+};
 
-    fn evaluate(
-        ptr: *anyopaque,
-        func: pr.Function,
-        candidates: []const AvailableCandidate,
-        selected_device: device.Device,
-        allocator: std.mem.Allocator,
-    ) EvaluationError!Evaluation {
-        const self: *MeasuredEvaluator = @ptrCast(@alignCast(ptr));
-        const original = try self.measure_fn(
-            self.ptr,
-            func,
-            .original,
-            selected_device,
-            allocator,
-        );
-        if (!original.correct) return error.EvaluationFailed;
+/// Options for compiling and measuring discovered candidates.
+pub const CollectOpts = struct {
+    /// Device passed to providers and the optional measurer.
+    device: device.Device,
+    /// Extracted candidates to compile and measure.
+    candidates: *const kernel.ExtractedCandidates,
+    /// Measurement mechanism. Missing measurement leaves every implementation
+    ///  available but without profitability evidence.
+    measurer: ?Measurer = null,
+};
 
-        var fastest_ns = original.elapsed_ns;
-        var fastest: ?usize = null;
-        for (candidates, 0..) |*candidate, index| {
-            const measured = try self.measure_fn(
-                self.ptr,
-                func,
-                .{ .provider = candidate },
-                selected_device,
-                allocator,
-            );
-            if (measured.correct and measured.elapsed_ns < fastest_ns) {
-                fastest_ns = measured.elapsed_ns;
-                fastest = index;
-            }
+/// Compile every eligible provider implementation and retain all measurements.
+///
+/// Every candidate must first pass through `pr.transform.kernelize.ExtractCandidates`.
+///
+/// Returned result borrows candidate and PR storage.
+pub fn collect(
+    /// Allocator owning compiled artifacts, measurements, and result storage.
+    allocator: std.mem.Allocator,
+    /// Program containing every extracted callable.
+    program: *const pr.Program,
+    /// Providers eligible to compile discovered candidates.
+    providers: []const kernel.KernelProvider,
+    /// Target, candidate collection, and optional measurement mechanism.
+    opts: CollectOpts,
+) !EvaluatedCandidates {
+    try kernel.validate_providers(providers);
+
+    var entries = std.ArrayList(EvaluatedCandidate).empty;
+    errdefer deinit_entry_list(allocator, &entries);
+
+    for (opts.candidates.entries.items) |candidate| {
+        const boundary = candidate.boundary;
+        const callable = program.get_function_by_id(candidate.callable_function) orelse
+            return error.CallUnresolvedCallee;
+
+        var implementations = std.ArrayList(kernel.ProviderCandidate).empty;
+        errdefer {
+            for (implementations.items) |implementation|
+                allocator.free(implementation.artifact.data);
+            implementations.deinit(allocator);
         }
-
-        return if (fastest) |index|
-            .{
-                .candidate = .{ .provider = index },
-                .reason = "provider measured faster than the original callable",
-                .timing = .{
-                    .original_ns = original.elapsed_ns,
-                    .selected_ns = fastest_ns,
+        const request = boundary.request();
+        for (0..request.len()) |request_index| {
+            const provider_name = request.at(request_index);
+            const provider = kernel.find_provider(providers, provider_name) orelse {
+                log.info("candidate for function '{s}' requests unconfigured provider '{s}'", .{
+                    callable.name,
+                    provider_name,
+                });
+                return error.ProviderNotConfigured;
+            };
+            try implementations.ensureUnusedCapacity(allocator, 1);
+            const artifact = provider.compiler.compile(
+                callable,
+                opts.device,
+                allocator,
+            ) catch |err| switch (err) {
+                error.Unsupported => {
+                    log.debug("provider '{s}' cannot handle function '{s}'", .{
+                        provider_name,
+                        callable.name,
+                    });
+                    continue;
                 },
-            }
-        else
-            .{
-                .candidate = .original,
-                .reason = "no correct provider measured faster than the original callable",
-                .timing = .{
-                    .original_ns = original.elapsed_ns,
-                    .selected_ns = fastest_ns,
+                else => {
+                    log.err("provider '{s}' failed to compile function '{s}': {s}", .{
+                        provider_name,
+                        callable.name,
+                        @errorName(err),
+                    });
+                    return err;
                 },
             };
-    }
-};
+            implementations.appendAssumeCapacity(.{
+                .provider_name = provider_name,
+                .artifact = artifact,
+            });
+        }
 
-/// Tuning result containing populated store and dispatch registry.
-///
-/// Caller owns both and must call `deinit()` when done.
-pub const TuneResult = struct {
-    store: kernel.KernelStore,
-    dispatch_registry: kernel.DispatchRegistry,
+        const owned_implementations = try implementations.toOwnedSlice(allocator);
+        errdefer {
+            for (owned_implementations) |implementation|
+                allocator.free(implementation.artifact.data);
+            allocator.free(owned_implementations);
+        }
+        const measurements = if (owned_implementations.len == 0) blk: {
+            break :blk try allocator.alloc(Measurement, 0);
+        } else if (opts.measurer) |measurer| blk: {
+            const measured = try measurer.measure(
+                callable,
+                owned_implementations,
+                opts.device,
+                allocator,
+            );
+            if (measured.len != owned_implementations.len) {
+                measurement.deinit_measurements(allocator, measured);
+                return error.InvalidMeasurementSet;
+            }
+            if (!valid_measurements(measured)) {
+                measurement.deinit_measurements(allocator, measured);
+                return error.InvalidMeasurementSet;
+            }
+            break :blk measured;
+        } else blk: {
+            const unavailable = try allocator.alloc(Measurement, owned_implementations.len);
+            @memset(unavailable, .unavailable);
+            break :blk unavailable;
+        };
+        errdefer measurement.deinit_measurements(allocator, measurements);
 
-    pub fn deinit(self: *TuneResult) void {
-        self.dispatch_registry.deinit();
-        self.store.deinit();
-    }
-};
-
-/// Tune a program: walk all functions for provider requests, invoke
-/// providers, and record selections in the returned store.
-///
-/// Provider regions must first pass through
-///  `pr.transform.kernelize.OutlineCandidates`.
-///
-/// On success, callers pass `result.store` to a kernelization operation and
-///  `result.dispatch_registry` to the execution integration. Providers are
-///  finalized before return.
-pub fn tune(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    program: *const pr.Program,
-    providers: []const kernel.KernelProvider,
-    opts: TuneOpts,
-) !TuneResult {
-    try kernel.validate_providers(providers);
-    try kernel.require_outlined_requests(program);
-    defer for (providers) |provider| provider.finalize();
-
-    var store = kernel.KernelStore.init(allocator);
-    errdefer store.deinit();
-
-    var dispatch_registry = kernel.DispatchRegistry.init(allocator);
-    errdefer dispatch_registry.deinit();
-
-    const tune_start = std.Io.Timestamp.now(io, .awake);
-
-    var total_selected: usize = 0;
-    var total_dedup: usize = 0;
-    var total_original: usize = 0;
-
-    for (program.functions()) |func| {
-        const stats = try tune_function(
-            allocator,
-            func,
-            providers,
-            &store,
-            &dispatch_registry,
-            opts.device,
-            opts.evaluator,
-        );
-        total_selected += stats.selected;
-        total_dedup += stats.dedup;
-        total_original += stats.original;
-    }
-
-    log.info("tuning completed: {d} provider, {d} dedup, {d} original in {d:.2}ms", .{
-        total_selected, total_dedup, total_original, ns_to_ms(@intCast(tune_start.untilNow(io, .awake).toNanoseconds())),
-    });
-
-    if (opts.dump_results) {
-        dump_store_summary(io, &store);
+        try entries.append(allocator, .{
+            .boundary = boundary,
+            .callable = callable,
+            .implementations = owned_implementations,
+            .measurements = measurements,
+        });
     }
 
     return .{
-        .store = store,
-        .dispatch_registry = dispatch_registry,
+        .allocator = allocator,
+        .entries = try entries.toOwnedSlice(allocator),
     };
 }
 
-const TuneStats = struct {
-    selected: usize = 0,
-    dedup: usize = 0,
-    original: usize = 0,
+fn valid_measurements(measurements: []const Measurement) bool {
+    for (measurements) |result| switch (result) {
+        .unavailable, .incorrect => {},
+        .measured => |samples| {
+            if (samples.len == 0) return false;
+            for (samples) |sample| {
+                if (sample.unreplaced_ns == 0 or sample.selected_ns == 0)
+                    return false;
+            }
+        },
+    };
+    return true;
+}
+
+fn deinit_entry_list(
+    allocator: std.mem.Allocator,
+    entries: *std.ArrayList(EvaluatedCandidate),
+) void {
+    for (entries.items) |*entry| entry.deinit(allocator);
+    entries.deinit(allocator);
+}
+
+/// Final disposition of a candidate.
+pub const Decision = struct {
+    /// Source boundary identified by function and operation ids.
+    boundary: kernel.CandidateRegion,
+    /// Implementation selected for the boundary.
+    implementation: union(enum) {
+        /// Leave the source boundary available to the enclosing compiler.
+        unreplaced,
+        /// Select the implementation produced by this provider.
+        provider: []const u8,
+    },
+    /// Explanation copied into the final kernel store.
+    reason: []const u8,
+    /// Measurement summary retained by the resolving policy.
+    measurement: ?kernel.MeasurementEvidence = null,
 };
 
-fn tune_function(
-    allocator: std.mem.Allocator,
-    func: pr.Function,
-    providers: []const kernel.KernelProvider,
-    store: *kernel.KernelStore,
-    dispatch_registry: *kernel.DispatchRegistry,
-    selected_device: device.Device,
-    evaluator: ?Evaluator,
-) !TuneStats {
-    var stats: TuneStats = .{};
-    const request = (try kernel.requested_providers(func)) orelse return stats;
-
-    const function_fingerprint = try fingerprint.function(allocator, func);
-    const selection_key = try kernel.make_selection_key(
-        allocator,
-        request,
-        selected_device,
-        function_fingerprint,
-    );
-    defer allocator.free(selection_key.bytes);
-
-    if (store.get(selection_key) != null) {
-        stats.dedup += 1;
-        log.debug("dedup: function '{s}' selection already in store", .{func.name});
-        return stats;
-    }
-
-    var candidates = std.ArrayList(AvailableCandidate).empty;
-    defer candidates.deinit(allocator);
-    defer for (candidates.items) |candidate| allocator.free(candidate.artifact.data);
-
-    for (0..request.len()) |request_index| {
-        const provider_name = request.at(request_index);
-        const provider = find_provider(providers, provider_name) orelse {
-            log.debug("no provider named '{s}' for function '{s}'", .{ provider_name, func.name });
-            continue;
-        };
-        const artifact = provider.compile(func, selected_device, allocator) catch |err| switch (err) {
-            error.Unsupported => {
-                log.debug("provider '{s}' cannot handle function '{s}'", .{ provider_name, func.name });
-                continue;
-            },
-            else => {
-                log.err("provider '{s}' failed to compile function '{s}': {s}", .{ provider_name, func.name, @errorName(err) });
-                return err;
-            },
-        };
-        try candidates.append(allocator, .{
-            .provider_name = provider_name,
-            .artifact = artifact,
-        });
-    }
-
-    if (candidates.items.len == 0) {
-        stats.original += 1;
-        try store.put(selection_key, .{
-            .candidate = .original,
-            .reason = "no requested provider produced an artifact",
-        });
-        return stats;
-    }
-
-    const evaluation = if (evaluator) |selected_evaluator|
-        try selected_evaluator.evaluate(
-            func,
-            candidates.items,
-            selected_device,
-            allocator,
-        )
-    else
-        Evaluation{
-            .candidate = .original,
-            .reason = "no candidate evaluator was configured",
-        };
-
-    switch (evaluation.candidate) {
-        .original => {
-            stats.original += 1;
-            try store.put(selection_key, .{
-                .candidate = .original,
-                .reason = evaluation.reason,
-                .timing = evaluation.timing,
-            });
-        },
-        .provider => |candidate_index| {
-            if (candidate_index >= candidates.items.len) return error.InvalidEvaluation;
-            const selected = candidates.items[candidate_index];
-            stats.selected += 1;
-            candidates.items[candidate_index].artifact.data = &.{};
-            try store.put(selection_key, .{
-                .candidate = .{ .provider = .{
-                    .provider_name = selected.provider_name,
-                    .artifact = selected.artifact,
-                } },
-                .reason = evaluation.reason,
-                .timing = evaluation.timing,
-            });
-            try register_provider_dispatch(
-                dispatch_registry,
-                find_provider(providers, selected.provider_name).?,
-            );
-        },
-    }
-
-    log.debug("evaluated {d} provider candidates for function '{s}': {s}", .{
-        candidates.items.len,
-        func.name,
-        evaluation.reason,
-    });
-
-    return stats;
-}
-
-/// Register a provider's dispatch entry in the registry (idempotent).
+/// Resolver output identified independently of candidate storage order.
 ///
-/// Precondition: if `dispatch_fn` is set, `dispatch_ctx` must also be set.
-fn register_provider_dispatch(dispatch_registry: *kernel.DispatchRegistry, provider: kernel.KernelProvider) !void {
-    if (provider.dispatch_fn) |dfn| {
-        try dispatch_registry.register(provider.name, .{
-            .dispatch_fn = dfn,
-            .prepare_fn = provider.prepare_fn,
-            .dispatch_ctx = provider.dispatch_ctx orelse unreachable,
-        });
+/// The resolution owns the decision slice. Nested boundary, provider, and
+///  reason slices are borrowed until the result is consumed.
+pub const Resolution = struct {
+    /// Allocator owning `decisions`.
+    allocator: std.mem.Allocator,
+    /// One decision for each evaluated boundary, in any order.
+    decisions: []Decision,
+
+    /// Release resolver-owned decision storage.
+    pub fn deinit(self: *Resolution) void {
+        self.allocator.free(self.decisions);
+        self.* = undefined;
+    }
+};
+
+/// Failures exposed by a type-erased resolution policy.
+pub const ResolveError = std.mem.Allocator.Error || error{
+    /// Resolver input or output violates the resolution contract.
+    InvalidResolution,
+    /// Resolver policy failed after emitting integration-specific diagnostics.
+    ResolutionFailed,
+    /// A candidate boundary no longer resolves in its source function.
+    StaleKernelCandidate,
+};
+
+/// Type-erased policy over complete candidate evidence.
+pub const Resolver = struct {
+    /// Policy state borrowed for the lifetime of this interface.
+    context: *anyopaque,
+    /// Static dispatch table for `context`.
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        resolve: *const fn (
+            context: *anyopaque,
+            program: *const pr.Program,
+            evaluated: []const EvaluatedCandidate,
+            allocator: std.mem.Allocator,
+        ) ResolveError!Resolution,
+    };
+
+    /// Resolve provider and overlap choices for the complete collection.
+    pub fn resolve(
+        self: Resolver,
+        /// Program containing the source boundaries under resolution.
+        program: *const pr.Program,
+        /// Candidate boundaries with aligned implementations and measurements.
+        evaluated: []const EvaluatedCandidate,
+        /// Allocator owning the returned decision slice.
+        allocator: std.mem.Allocator,
+    ) ResolveError!Resolution {
+        return try self.vtable.resolve(self.context, program, evaluated, allocator);
+    }
+};
+
+/// Local additive profitability policy with per-function interval resolution.
+///
+/// The policy first retains the statistically accepted implementation with the
+///  largest estimated latency savings at each boundary. It then maximizes the
+///  sum of those savings among non-overlapping boundaries in each source
+///  function with weighted interval scheduling. Profitability uses a one-sided
+///  paired sign test with a Bonferroni correction across implementations. *The
+///  additive model does not represent cross-boundary runtime interactions.*
+pub const LocalResolver = struct {
+    pub const Options = struct {
+        /// Family-wise one-sided sign-test threshold for each boundary.
+        ///
+        /// Bonferroni correction divides this value by the number of
+        ///  implementations at that boundary.
+        alpha: f64 = 0.05,
+        /// Smallest accepted fractional reduction in median latency.
+        minimum_speedup: f64 = 0.01,
+    };
+
+    /// Statistical thresholds used by the local policy.
+    options: Options = .{},
+
+    /// Return the type-erased resolver interface.
+    pub fn interface(self: *LocalResolver) Resolver {
+        return .{
+            .context = @ptrCast(self),
+            .vtable = &.{ .resolve = resolve_impl },
+        };
+    }
+
+    fn resolve_impl(
+        ptr: *anyopaque,
+        program: *const pr.Program,
+        evaluated: []const EvaluatedCandidate,
+        allocator: std.mem.Allocator,
+    ) ResolveError!Resolution {
+        const self: *LocalResolver = @ptrCast(@alignCast(ptr));
+        if (self.options.alpha <= 0.0 or self.options.alpha >= 1.0 or
+            self.options.minimum_speedup < 0.0 or self.options.minimum_speedup >= 1.0)
+        {
+            return error.InvalidResolution;
+        }
+
+        const decisions = try allocator.alloc(Decision, evaluated.len);
+        errdefer allocator.free(decisions);
+        for (evaluated, decisions) |candidate, *decision| {
+            decision.* = .{
+                .boundary = candidate.boundary,
+                .implementation = .unreplaced,
+                .reason = if (candidate.implementations.len == 0)
+                    "no requested provider produced an artifact"
+                else
+                    "no provider passed local profitability policy",
+            };
+        }
+
+        var viable = std.ArrayList(ViableChoice).empty;
+        defer viable.deinit(allocator);
+        for (evaluated, 0..) |*candidate, candidate_index| {
+            if (candidate.implementations.len != candidate.measurements.len)
+                return error.InvalidResolution;
+            const source = program.get_function_by_id(candidate.boundary.source_function) orelse
+                return error.InvalidResolution;
+            const range = candidate.boundary.resolve_range(source) orelse
+                return error.StaleKernelCandidate;
+            const selected = try best_local_implementation(
+                allocator,
+                candidate,
+                self.options,
+            ) orelse
+                continue;
+            try viable.append(allocator, .{
+                .candidate_index = candidate_index,
+                .provider_name = candidate.implementations[selected.index].provider_name,
+                .source_function = candidate.boundary.source_function,
+                .start = range.start,
+                .end = range.end,
+                .evidence = selected.evidence,
+            });
+            decisions[candidate_index].reason = "profitable candidate excluded by overlap resolution";
+        }
+
+        std.mem.sortUnstable(ViableChoice, viable.items, {}, viable_less_than);
+        var start: usize = 0;
+        while (start < viable.items.len) {
+            var end = start + 1;
+            while (end < viable.items.len and
+                viable.items[end].source_function == viable.items[start].source_function)
+            {
+                end += 1;
+            }
+            try select_nonoverlapping(allocator, viable.items[start..end], decisions);
+            start = end;
+        }
+
+        return .{ .allocator = allocator, .decisions = decisions };
+    }
+};
+
+const ViableChoice = struct {
+    candidate_index: usize,
+    provider_name: []const u8,
+    source_function: pr.FunctionId,
+    start: usize,
+    end: usize,
+    evidence: kernel.MeasurementEvidence,
+};
+
+const LocalImplementation = struct {
+    index: usize,
+    evidence: kernel.MeasurementEvidence,
+};
+
+fn best_local_implementation(
+    allocator: std.mem.Allocator,
+    candidate: *const EvaluatedCandidate,
+    options: LocalResolver.Options,
+) ResolveError!?LocalImplementation {
+    if (candidate.implementations.len == 0) return null;
+    const adjusted_alpha = options.alpha /
+        @as(f64, @floatFromInt(candidate.implementations.len));
+    var best: ?LocalImplementation = null;
+    for (candidate.measurements, 0..) |result, implementation_index| {
+        const samples = switch (result) {
+            .measured => |value| value,
+            else => continue,
+        };
+        const evidence = try summarize_measurement(allocator, samples);
+        const baseline = evidence.unreplaced_ns;
+        const selected = evidence.selected_ns;
+        if (selected >= baseline or evidence.p_value > adjusted_alpha)
+            continue;
+        const speedup = 1.0 - @as(f64, @floatFromInt(selected)) /
+            @as(f64, @floatFromInt(baseline));
+        if (speedup < options.minimum_speedup) continue;
+        if (best) |incumbent| {
+            const savings = baseline - selected;
+            const incumbent_savings = incumbent.evidence.unreplaced_ns -
+                incumbent.evidence.selected_ns;
+            if (savings <= incumbent_savings) continue;
+        }
+        best = .{ .index = implementation_index, .evidence = evidence };
+    }
+    return best;
+}
+
+fn summarize_measurement(
+    allocator: std.mem.Allocator,
+    samples: []const Sample,
+) ResolveError!kernel.MeasurementEvidence {
+    if (samples.len == 0 or samples.len > 63) return error.InvalidResolution;
+    const unreplaced = try allocator.alloc(u64, samples.len);
+    defer allocator.free(unreplaced);
+    const selected = try allocator.alloc(u64, samples.len);
+    defer allocator.free(selected);
+    for (samples, unreplaced, selected) |sample, *baseline, *candidate| {
+        if (sample.unreplaced_ns == 0 or sample.selected_ns == 0)
+            return error.InvalidResolution;
+        baseline.* = sample.unreplaced_ns;
+        candidate.* = sample.selected_ns;
+    }
+    return .{
+        .unreplaced_ns = median(unreplaced),
+        .selected_ns = median(selected),
+        .p_value = paired_sign_test(samples),
+    };
+}
+
+fn median(values: []u64) u64 {
+    std.debug.assert(values.len > 0);
+    std.mem.sort(u64, values, {}, std.sort.asc(u64));
+    const middle = values.len / 2;
+    if (values.len % 2 == 1) return values[middle];
+    return values[middle - 1] + (values[middle] - values[middle - 1]) / 2;
+}
+
+fn paired_sign_test(samples: []const Sample) f64 {
+    std.debug.assert(samples.len <= 63);
+    var wins: usize = 0;
+    var observations: usize = 0;
+    for (samples) |sample| {
+        if (sample.unreplaced_ns == sample.selected_ns) continue;
+        observations += 1;
+        if (sample.selected_ns < sample.unreplaced_ns) wins += 1;
+    }
+    if (observations == 0) return 1.0;
+
+    var combination: u128 = 1;
+    var numerator: u128 = 0;
+    for (0..observations + 1) |successes| {
+        if (successes >= wins) numerator += combination;
+        if (successes < observations) {
+            combination = combination * (observations - successes) / (successes + 1);
+        }
+    }
+    const denominator: u128 = @as(u128, 1) << @intCast(observations);
+    return @as(f64, @floatFromInt(numerator)) /
+        @as(f64, @floatFromInt(denominator));
+}
+
+fn viable_less_than(_: void, lhs: ViableChoice, rhs: ViableChoice) bool {
+    if (lhs.source_function != rhs.source_function)
+        return @intFromEnum(lhs.source_function) < @intFromEnum(rhs.source_function);
+    if (lhs.end != rhs.end) return lhs.end < rhs.end;
+    if (lhs.start != rhs.start) return lhs.start < rhs.start;
+    return lhs.candidate_index < rhs.candidate_index;
+}
+
+fn select_nonoverlapping(
+    allocator: std.mem.Allocator,
+    candidates: []const ViableChoice,
+    decisions: []Decision,
+) std.mem.Allocator.Error!void {
+    const best_savings = try allocator.alloc(u128, candidates.len + 1);
+    defer allocator.free(best_savings);
+    const compatible_prefix = try allocator.alloc(usize, candidates.len);
+    defer allocator.free(compatible_prefix);
+    const take = try allocator.alloc(bool, candidates.len);
+    defer allocator.free(take);
+
+    best_savings[0] = 0;
+    for (candidates, 0..) |candidate, index| {
+        var prefix = index;
+        while (prefix > 0 and candidates[prefix - 1].end > candidate.start)
+            prefix -= 1;
+        compatible_prefix[index] = prefix;
+        const with_candidate = best_savings[prefix] +
+            candidate.evidence.unreplaced_ns - candidate.evidence.selected_ns;
+        const without_candidate = best_savings[index];
+        take[index] = with_candidate > without_candidate;
+        best_savings[index + 1] = if (take[index]) with_candidate else without_candidate;
+    }
+
+    var cursor = candidates.len;
+    while (cursor > 0) {
+        const index = cursor - 1;
+        if (!take[index]) {
+            cursor = index;
+            continue;
+        }
+        const candidate = candidates[index];
+        decisions[candidate.candidate_index] = .{
+            .boundary = decisions[candidate.candidate_index].boundary,
+            .implementation = .{ .provider = candidate.provider_name },
+            .reason = "provider passed local profitability and overlap policy",
+            .measurement = candidate.evidence,
+        };
+        cursor = compatible_prefix[index];
     }
 }
 
-fn find_provider(providers: []const kernel.KernelProvider, name: []const u8) ?kernel.KernelProvider {
-    for (providers) |p| {
-        if (std.mem.eql(u8, p.name, name)) return p;
+/// Materialize one resolver result as the final in-memory kernel plan.
+///
+/// Selected artifacts are copied so the evaluated collection is usable
+///  by another resolver.
+pub fn resolve(
+    /// Allocator owning the returned kernel store.
+    allocator: std.mem.Allocator,
+    /// Program containing source boundaries and extracted callables.
+    program: *const pr.Program,
+    /// Complete candidate evidence passed to `resolver`.
+    evaluated: *const EvaluatedCandidates,
+    /// Device encoded into final selection keys.
+    selected_device: device.Device,
+    /// Policy that selects implementations and resolves conflicts.
+    resolver: Resolver,
+) !kernel.KernelStore {
+    var resolution = try resolver.resolve(program, evaluated.entries, allocator);
+    defer resolution.deinit();
+    if (resolution.decisions.len != evaluated.entries.len)
+        return error.InvalidResolution;
+
+    var store = kernel.KernelStore.init(allocator);
+    errdefer store.deinit();
+    const resolved = try allocator.alloc(bool, evaluated.entries.len);
+    defer allocator.free(resolved);
+    @memset(resolved, false);
+    for (resolution.decisions) |decision| {
+        if (decision.measurement) |evidence| {
+            if (!valid_measurement_evidence(evidence))
+                return error.InvalidResolution;
+        }
+        const candidate_index = find_evaluated_candidate(evaluated.entries, decision.boundary) orelse
+            return error.InvalidResolution;
+        if (resolved[candidate_index]) return error.InvalidResolution;
+        resolved[candidate_index] = true;
+        const candidate = evaluated.entries[candidate_index];
+        const function_fingerprint = try fingerprint.function(allocator, candidate.callable);
+        const key = try kernel.make_selection_key(
+            allocator,
+            candidate.boundary,
+            selected_device,
+            function_fingerprint,
+        );
+        defer allocator.free(key.bytes);
+
+        switch (decision.implementation) {
+            .unreplaced => try store.put(key, .{
+                .candidate = .unreplaced,
+                .reason = decision.reason,
+                .measurement = decision.measurement,
+            }),
+            .provider => |provider_name| {
+                const implementation_index = find_implementation(
+                    candidate.implementations,
+                    provider_name,
+                ) orelse return error.InvalidResolution;
+                const selected = candidate.implementations[implementation_index];
+                try store.put(key, .{
+                    .candidate = .{ .provider = .{
+                        .provider_name = selected.provider_name,
+                        .artifact = .{
+                            .data = try allocator.dupe(u8, selected.artifact.data),
+                            .workspace_bytes = selected.artifact.workspace_bytes,
+                            .workspace_alignment = selected.artifact.workspace_alignment,
+                        },
+                    } },
+                    .reason = decision.reason,
+                    .measurement = decision.measurement,
+                });
+            },
+        }
+    }
+    for (resolved) |found| if (!found) return error.InvalidResolution;
+    return store;
+}
+
+fn valid_measurement_evidence(evidence: kernel.MeasurementEvidence) bool {
+    return evidence.unreplaced_ns > 0 and evidence.selected_ns > 0 and
+        std.math.isFinite(evidence.p_value) and
+        evidence.p_value >= 0.0 and evidence.p_value <= 1.0;
+}
+
+fn find_evaluated_candidate(
+    evaluated: []const EvaluatedCandidate,
+    boundary: kernel.CandidateRegion,
+) ?usize {
+    for (evaluated, 0..) |candidate, index| {
+        if (candidate.boundary.same_boundary(boundary)) return index;
     }
     return null;
+}
+
+fn find_implementation(
+    implementations: []const kernel.ProviderCandidate,
+    provider_name: []const u8,
+) ?usize {
+    for (implementations, 0..) |implementation, index| {
+        if (std.mem.eql(u8, implementation.provider_name, provider_name)) return index;
+    }
+    return null;
+}
+
+/// Options for the compile, measure, and resolve convenience entrypoint.
+pub const TuneOpts = struct {
+    /// Print a summary table after resolution.
+    dump_results: bool = false,
+    /// Device passed through collection and final selection identity.
+    device: device.Device,
+    /// Extracted candidates to compile and measure.
+    candidates: *const kernel.ExtractedCandidates,
+    /// Optional target measurement mechanism.
+    measurer: ?Measurer = null,
+    /// Optional policy over the complete evaluated collection.
+    ///
+    /// The local additive policy is used when null.
+    resolver: ?Resolver = null,
+};
+
+/// Compile, measure, resolve, and return a final in-memory kernel plan.
+pub fn tune(
+    /// I/O state used for timing and diagnostics when applicable.
+    io: std.Io,
+    /// Allocator owning temporary evidence and the returned kernel store.
+    allocator: std.mem.Allocator,
+    /// Program containing every extracted candidate callable.
+    program: *const pr.Program,
+    /// Providers eligible to compile discovered candidates.
+    providers: []const kernel.KernelProvider,
+    /// Target, candidates, measurement, and resolution policy.
+    opts: TuneOpts,
+) !kernel.KernelStore {
+    const start = std.Io.Timestamp.now(io, .awake);
+    var evaluated = try collect(allocator, program, providers, .{
+        .device = opts.device,
+        .candidates = opts.candidates,
+        .measurer = opts.measurer,
+    });
+    defer evaluated.deinit();
+
+    var local_resolver = LocalResolver{};
+    var store = try resolve(
+        allocator,
+        program,
+        &evaluated,
+        opts.device,
+        opts.resolver orelse local_resolver.interface(),
+    );
+    errdefer store.deinit();
+
+    log.info("tuning resolved {d} candidate boundaries in {d:.2}ms", .{
+        evaluated.entries.len,
+        ns_to_ms(@intCast(start.untilNow(io, .awake).toNanoseconds())),
+    });
+    if (opts.dump_results) dump_store_summary(io, &store);
+    return store;
 }
 
 fn dump_store_summary(io: std.Io, store: *const kernel.KernelStore) void {
     var buf: [4096]u8 = undefined;
     var writer = std.Io.File.stdout().writer(io, &buf);
     const out = &writer.interface;
-
     out.writeAll("\n=== Tuning Summary ===\n") catch return;
-
-    var it = store.selections.iterator();
-    while (it.next()) |entry| {
+    var iterator = store.selections.iterator();
+    while (iterator.next()) |entry| {
         const selection = entry.value_ptr.*;
         switch (selection.candidate) {
             .provider => |stored| {
@@ -416,26 +722,27 @@ fn dump_store_summary(io: std.Io, store: *const kernel.KernelStore) void {
                     stored.artifact.data.len,
                     stored.artifact.workspace_bytes,
                 }) catch return;
-                dump_timing(out, selection.timing);
+                dump_measurement(out, selection.measurement);
             },
-            .original => {
-                out.print("  [=] {s}: original, reason={s}", .{
+            .unreplaced => {
+                out.print("  [=] {s}: unreplaced, reason={s}", .{
                     entry.key_ptr.*,
                     selection.reason,
                 }) catch return;
-                dump_timing(out, selection.timing);
+                dump_measurement(out, selection.measurement);
             },
         }
     }
-    out.writeAll("\n") catch {};
+    out.writeByte('\n') catch {};
     out.flush() catch {};
 }
 
-fn dump_timing(out: *std.Io.Writer, timing: ?kernel.TimingEvidence) void {
-    if (timing) |measured| {
-        out.print(", original={d}ns, selected={d}ns", .{
-            measured.original_ns,
+fn dump_measurement(out: *std.Io.Writer, measurement_evidence: ?kernel.MeasurementEvidence) void {
+    if (measurement_evidence) |measured| {
+        out.print(", unreplaced={d}ns, selected={d}ns, p={d:.4}", .{
+            measured.unreplaced_ns,
             measured.selected_ns,
+            measured.p_value,
         }) catch return;
     }
     out.writeByte('\n') catch {};
@@ -449,14 +756,16 @@ fn ns_to_ms(ns: u64) f64 {
 
 const TestProvider = struct {
     name: []const u8,
-    unsupported: bool,
+    unsupported: bool = false,
     calls: usize = 0,
 
     fn interface(self: *TestProvider) kernel.KernelProvider {
         return .{
             .name = self.name,
-            .ptr = @ptrCast(self),
-            .compile_fn = compile,
+            .compiler = .{
+                .context = @ptrCast(self),
+                .vtable = &.{ .compile = compile },
+            },
         };
     }
 
@@ -469,224 +778,74 @@ const TestProvider = struct {
         const self: *TestProvider = @ptrCast(@alignCast(ptr));
         self.calls += 1;
         if (self.unsupported) return error.Unsupported;
-
-        return .{
-            .data = try allocator.dupe(u8, self.name),
-        };
+        return .{ .data = try allocator.dupe(u8, self.name) };
     }
 };
 
-const TestEvaluator = struct {
-    select_provider: bool,
+const TestMeasurer = struct {
     calls: usize = 0,
 
-    fn interface(self: *TestEvaluator) Evaluator {
+    fn interface(self: *TestMeasurer) Measurer {
         return .{
-            .ptr = @ptrCast(self),
-            .evaluate_fn = evaluate,
+            .context = @ptrCast(self),
+            .vtable = &.{ .measure = measure },
         };
     }
 
-    fn evaluate(
+    fn measure(
         ptr: *anyopaque,
         _: pr.Function,
-        candidates: []const AvailableCandidate,
+        candidates: []const kernel.ProviderCandidate,
         _: device.Device,
-        _: std.mem.Allocator,
-    ) EvaluationError!Evaluation {
-        const self: *TestEvaluator = @ptrCast(@alignCast(ptr));
+        allocator: std.mem.Allocator,
+    ) MeasurementError![]Measurement {
+        const self: *TestMeasurer = @ptrCast(@alignCast(ptr));
         self.calls += 1;
-        return .{
-            .candidate = if (self.select_provider) .{ .provider = candidates.len - 1 } else .original,
-            .reason = if (self.select_provider)
-                "test measurement selected provider"
-            else
-                "test measurement selected original",
-        };
+        const results = try allocator.alloc(Measurement, candidates.len);
+        var result_count: usize = 0;
+        errdefer {
+            for (results[0..result_count]) |result| result.deinit(allocator);
+            allocator.free(results);
+        }
+        for (candidates, results, 0..) |_, *result, index| {
+            const samples = try allocator.alloc(Sample, 15);
+            @memset(samples, .{
+                .unreplaced_ns = 100,
+                .selected_ns = 80 - @as(u64, @intCast(index * 10)),
+            });
+            result.* = .{ .measured = samples };
+            result_count += 1;
+        }
+        return results;
     }
 };
 
-test "MeasuredEvaluator selects the fastest correct implementation" {
-    const testing = std.testing;
-    const Measurements = struct {
-        fn measure(
-            _: *anyopaque,
-            _: pr.Function,
-            candidate: MeasurableCandidate,
-            _: device.Device,
-            _: std.mem.Allocator,
-        ) EvaluationError!Measurement {
-            return switch (candidate) {
-                .original => .{ .elapsed_ns = 100, .correct = true },
-                .provider => |value| if (std.mem.eql(u8, value.provider_name, "fast"))
-                    .{ .elapsed_ns = 80, .correct = true }
-                else
-                    .{ .elapsed_ns = 40, .correct = false },
-            };
-        }
+fn discover_and_extract(
+    program: *pr.Program,
+    providers: []const kernel.KernelProvider,
+) !kernel.ExtractedCandidates {
+    const kernelize = @import("pr/transform/kernelize.zig");
+    var discovered = kernel.Candidates.init(std.testing.allocator);
+    defer discovered.deinit();
+    var extracted = kernel.ExtractedCandidates.init(std.testing.allocator);
+    errdefer extracted.deinit();
+    var context = @import("compilation.zig").Context{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
     };
-
-    var measurement_context: u8 = 0;
-    var evaluator = MeasuredEvaluator{
-        .ptr = @ptrCast(&measurement_context),
-        .measure_fn = Measurements.measure,
-    };
-    const candidates = [_]AvailableCandidate{
-        .{ .provider_name = "fast", .artifact = .{ .data = &.{} } },
-        .{ .provider_name = "incorrect", .artifact = .{ .data = &.{} } },
-    };
-    const selected = try evaluator.interface().evaluate(
-        undefined,
-        &candidates,
-        .{ .platform = .cpu },
-        testing.allocator,
-    );
-    switch (selected.candidate) {
-        .original => return error.TestUnexpectedResult,
-        .provider => |index| try testing.expectEqual(@as(usize, 0), index),
-    }
-    try testing.expectEqual(@as(u64, 100), selected.timing.?.original_ns);
-    try testing.expectEqual(@as(u64, 80), selected.timing.?.selected_ns);
+    _ = try (kernelize.DiscoverCandidates{
+        .providers = providers,
+        .candidates = &discovered,
+    }).run(program, &context);
+    _ = try (kernelize.ExtractCandidates{
+        .candidates = &discovered,
+        .extracted = &extracted,
+    }).run(program, &context);
+    return extracted;
 }
 
-fn expect_provider_selections(first_unsupported: bool) !void {
+test "collect retains every compiled implementation and measurement" {
     const testing = std.testing;
-    const selected_device = device.Device{ .platform = .cpu };
-
-    var program = pr.Program.init(testing.allocator);
-    defer program.deinit();
-
-    var builder = try pr.FunctionBuilder.init(&program, "main");
-    defer builder.deinit();
-    const first_input = try builder.param_tensor(.f32, &.{2});
-    const second_input = try builder.param_tensor(.f32, &.{2});
-
-    try builder.push_region("first_region", &.{kernel.provider_annotation("first")});
-    const first_output = try builder.emit(.{ .exp = {} }, &.{first_input});
-    try builder.pop_region();
-    try builder.push_region("second_region", &.{kernel.provider_annotation("second")});
-    const second_output = try builder.emit(.{ .exp = {} }, &.{second_input});
-    try builder.pop_region();
-
-    const function = try builder.finish(.{ .returns = &.{ first_output, second_output } });
-    _ = try program.add_function(function);
-
-    var outline_ctx = @import("compilation.zig").Context{
-        .allocator = testing.allocator,
-        .io = testing.io,
-    };
-    _ = try (@import("pr/transform/kernelize.zig").OutlineCandidates{}).run(&program, &outline_ctx);
-
-    var first = TestProvider{ .name = "first", .unsupported = first_unsupported };
-    var second = TestProvider{ .name = "second", .unsupported = !first_unsupported };
-    var evaluator = TestEvaluator{ .select_provider = true };
-    var result = try tune(testing.io, testing.allocator, &program, &.{
-        first.interface(),
-        second.interface(),
-    }, .{
-        .device = selected_device,
-        .evaluator = evaluator.interface(),
-    });
-    defer result.deinit();
-
-    try testing.expectEqual(@as(usize, 1), first.calls);
-    try testing.expectEqual(@as(usize, 1), second.calls);
-    try testing.expectEqual(@as(usize, 1), evaluator.calls);
-    try testing.expectEqual(@as(usize, 2), result.store.selections.count());
-
-    const first_fingerprint = try fingerprint.function(testing.allocator, program.functions()[1]);
-    const second_fingerprint = try fingerprint.function(testing.allocator, program.functions()[2]);
-
-    const first_key = try kernel.make_selection_key(
-        testing.allocator,
-        .{ .one = "first" },
-        selected_device,
-        first_fingerprint,
-    );
-    defer testing.allocator.free(first_key.bytes);
-    const second_key = try kernel.make_selection_key(
-        testing.allocator,
-        .{ .one = "second" },
-        selected_device,
-        second_fingerprint,
-    );
-    defer testing.allocator.free(second_key.bytes);
-
-    const first_selection = result.store.get(first_key) orelse return error.TestUnexpectedResult;
-    const second_selection = result.store.get(second_key) orelse return error.TestUnexpectedResult;
-    if (first_unsupported) {
-        switch (first_selection.candidate) {
-            .original => {},
-            .provider => return error.TestUnexpectedResult,
-        }
-        switch (second_selection.candidate) {
-            .provider => {},
-            .original => return error.TestUnexpectedResult,
-        }
-    } else {
-        switch (first_selection.candidate) {
-            .provider => {},
-            .original => return error.TestUnexpectedResult,
-        }
-        switch (second_selection.candidate) {
-            .original => {},
-            .provider => return error.TestUnexpectedResult,
-        }
-    }
-}
-
-test tune {
-    const testing = std.testing;
-
-    // A program without provider functions requires no tuning work.
-    var program = pr.Program.init(testing.allocator);
-    defer program.deinit();
-
-    var b = try pr.FunctionBuilder.init(&program, "main");
-    defer b.deinit();
-    const x = try b.param_tensor(.f32, &.{ 2, 3 });
-    const func = try b.finish(.{ .returns = &.{x} });
-    _ = try program.add_function(func);
-
-    var result = try tune(std.testing.io, testing.allocator, &program, &.{}, .{
-        .device = .{ .platform = .cpu },
-    });
-    defer result.deinit();
-
-    try testing.expectEqual(@as(usize, 0), result.store.selections.count());
-    try testing.expectEqual(@as(usize, 0), result.dispatch_registry.entries.count());
-}
-
-test "tune requires outlined provider requests" {
-    const testing = std.testing;
-
-    var program = pr.Program.init(testing.allocator);
-    defer program.deinit();
-    var builder = try pr.FunctionBuilder.init(&program, "main");
-    defer builder.deinit();
-    const input = try builder.param_tensor(.f32, &.{2});
-    try builder.push_region("candidate", &.{kernel.provider_annotation("test")});
-    const output = try builder.exp(input);
-    try builder.pop_region();
-    _ = try program.add_function(try builder.finish(.{ .returns = &.{output} }));
-
-    try testing.expectError(
-        error.ProviderRegionNotOutlined,
-        tune(testing.io, testing.allocator, &program, &.{}, .{
-            .device = .{ .platform = .cpu },
-        }),
-    );
-}
-
-test "tune isolates provider selections for equal functions" {
-    try expect_provider_selections(true);
-    try expect_provider_selections(false);
-}
-
-test "tune evaluates all providers for one callable" {
-    const testing = std.testing;
-    const selected_device = device.Device{ .platform = .cpu };
-
     var program = pr.Program.init(testing.allocator);
     defer program.deinit();
     var builder = try pr.FunctionBuilder.init(&program, "main");
@@ -697,46 +856,31 @@ test "tune evaluates all providers for one callable" {
     try builder.pop_region();
     _ = try program.add_function(try builder.finish(.{ .returns = &.{output} }));
 
-    var outline_ctx = @import("compilation.zig").Context{
-        .allocator = testing.allocator,
-        .io = testing.io,
-    };
-    _ = try (@import("pr/transform/kernelize.zig").OutlineCandidates{}).run(&program, &outline_ctx);
-
-    var first = TestProvider{ .name = "first", .unsupported = false };
-    var second = TestProvider{ .name = "second", .unsupported = false };
-    var evaluator = TestEvaluator{ .select_provider = true };
-    var result = try tune(testing.io, testing.allocator, &program, &.{
-        first.interface(),
-        second.interface(),
-    }, .{
-        .device = selected_device,
-        .evaluator = evaluator.interface(),
+    var first = TestProvider{ .name = "first" };
+    var second = TestProvider{ .name = "second" };
+    const providers = [_]kernel.KernelProvider{ first.interface(), second.interface() };
+    var candidates = try discover_and_extract(&program, &providers);
+    defer candidates.deinit();
+    var measurer = TestMeasurer{};
+    var evaluated = try collect(testing.allocator, &program, &providers, .{
+        .device = .{ .platform = .cpu },
+        .candidates = &candidates,
+        .measurer = measurer.interface(),
     });
-    defer result.deinit();
+    defer evaluated.deinit();
 
-    const function_fingerprint = try fingerprint.function(testing.allocator, program.functions()[1]);
-    const key = try kernel.make_selection_key(
-        testing.allocator,
-        .{ .many = &.{ "first", "second" } },
-        selected_device,
-        function_fingerprint,
-    );
-    defer testing.allocator.free(key.bytes);
-    const selection = result.store.get(key) orelse return error.TestUnexpectedResult;
-    switch (selection.candidate) {
-        .original => return error.TestUnexpectedResult,
-        .provider => |selected| try testing.expectEqualStrings("second", selected.provider_name),
-    }
-    try testing.expectEqual(@as(usize, 1), first.calls);
-    try testing.expectEqual(@as(usize, 1), second.calls);
-    try testing.expectEqual(@as(usize, 1), evaluator.calls);
+    try testing.expectEqual(@as(usize, 1), evaluated.entries.len);
+    try testing.expectEqual(@as(usize, 2), evaluated.entries[0].implementations.len);
+    try testing.expectEqual(@as(usize, 2), evaluated.entries[0].measurements.len);
+    for (evaluated.entries[0].measurements) |result| switch (result) {
+        .measured => |samples| try testing.expectEqual(@as(usize, 15), samples.len),
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expectEqual(@as(usize, 1), measurer.calls);
 }
 
-test "tune retains original without an evaluator" {
+test "collect rejects a missing requested provider" {
     const testing = std.testing;
-    const selected_device = device.Device{ .platform = .cpu };
-
     var program = pr.Program.init(testing.allocator);
     defer program.deinit();
     var builder = try pr.FunctionBuilder.init(&program, "main");
@@ -746,30 +890,173 @@ test "tune retains original without an evaluator" {
     const output = try builder.exp(input);
     try builder.pop_region();
     _ = try program.add_function(try builder.finish(.{ .returns = &.{output} }));
-    var outline_ctx = @import("compilation.zig").Context{
-        .allocator = testing.allocator,
-        .io = testing.io,
-    };
-    _ = try (@import("pr/transform/kernelize.zig").OutlineCandidates{}).run(&program, &outline_ctx);
 
-    var provider = TestProvider{ .name = "provider", .unsupported = false };
-    var result = try tune(testing.io, testing.allocator, &program, &.{provider.interface()}, .{
-        .device = selected_device,
-    });
-    defer result.deinit();
+    var provider = TestProvider{ .name = "provider" };
+    const discovery_providers = [_]kernel.KernelProvider{provider.interface()};
+    var candidates = try discover_and_extract(&program, &discovery_providers);
+    defer candidates.deinit();
 
-    const function_fingerprint = try fingerprint.function(testing.allocator, program.functions()[1]);
-    const key = try kernel.make_selection_key(
-        testing.allocator,
-        .{ .one = "provider" },
-        selected_device,
-        function_fingerprint,
+    try testing.expectError(
+        error.ProviderNotConfigured,
+        collect(testing.allocator, &program, &.{}, .{
+            .device = .{ .platform = .cpu },
+            .candidates = &candidates,
+        }),
     );
-    defer testing.allocator.free(key.bytes);
-    const selection = result.store.get(key) orelse return error.TestUnexpectedResult;
+}
+
+test "local measurement summary retains paired-test semantics" {
+    var samples = [_]Sample{.{ .unreplaced_ns = 100, .selected_ns = 90 }} ** 10;
+    const evidence = try summarize_measurement(std.testing.allocator, &samples);
+    try std.testing.expectEqual(@as(u64, 100), evidence.unreplaced_ns);
+    try std.testing.expectEqual(@as(u64, 90), evidence.selected_ns);
+    try std.testing.expectApproxEqAbs(
+        @as(f64, 1.0 / 1024.0),
+        evidence.p_value,
+        1e-12,
+    );
+}
+
+test "tune uses occurrence-specific selection identity" {
+    const testing = std.testing;
+    const selected_device = device.Device{ .platform = .cpu };
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+    var builder = try pr.FunctionBuilder.init(&program, "main");
+    defer builder.deinit();
+    const first_input = try builder.param_tensor(.f32, &.{2});
+    const second_input = try builder.param_tensor(.f32, &.{2});
+    try builder.push_region("first", &.{kernel.provider_annotation("provider")});
+    const first = try builder.exp(first_input);
+    try builder.pop_region();
+    try builder.push_region("second", &.{kernel.provider_annotation("provider")});
+    const second = try builder.exp(second_input);
+    try builder.pop_region();
+    _ = try program.add_function(try builder.finish(.{ .returns = &.{ first, second } }));
+
+    var provider = TestProvider{ .name = "provider" };
+    const providers = [_]kernel.KernelProvider{provider.interface()};
+    var candidates = try discover_and_extract(&program, &providers);
+    defer candidates.deinit();
+    var measurer = TestMeasurer{};
+    var store = try tune(testing.io, testing.allocator, &program, &providers, .{
+        .device = selected_device,
+        .candidates = &candidates,
+        .measurer = measurer.interface(),
+    });
+    defer store.deinit();
+
+    try testing.expectEqual(@as(usize, 2), store.selections.count());
+    try testing.expectEqual(@as(usize, 2), provider.calls);
+    try testing.expectEqual(@as(usize, 2), measurer.calls);
+}
+
+test "local resolver leaves unmeasured implementations unreplaced" {
+    const testing = std.testing;
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+    var builder = try pr.FunctionBuilder.init(&program, "main");
+    defer builder.deinit();
+    const input = try builder.param_tensor(.f32, &.{2});
+    try builder.push_region("candidate", &.{kernel.provider_annotation("provider")});
+    const output = try builder.exp(input);
+    try builder.pop_region();
+    _ = try program.add_function(try builder.finish(.{ .returns = &.{output} }));
+
+    var provider = TestProvider{ .name = "provider" };
+    const providers = [_]kernel.KernelProvider{provider.interface()};
+    var candidates = try discover_and_extract(&program, &providers);
+    defer candidates.deinit();
+    var store = try tune(testing.io, testing.allocator, &program, &providers, .{
+        .device = .{ .platform = .cpu },
+        .candidates = &candidates,
+    });
+    defer store.deinit();
+    try testing.expectEqual(@as(usize, 1), store.selections.count());
+    var iterator = store.selections.valueIterator();
+    const selection = iterator.next() orelse return error.TestUnexpectedResult;
     switch (selection.candidate) {
-        .original => {},
+        .unreplaced => {},
         .provider => return error.TestUnexpectedResult,
     }
-    try testing.expectEqual(@as(usize, 0), result.dispatch_registry.entries.count());
+}
+
+test "local resolver maximizes nonoverlapping estimated savings" {
+    const testing = std.testing;
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+    var builder = try pr.FunctionBuilder.init(&program, "main");
+    defer builder.deinit();
+    const input = try builder.param_tensor(.f32, &.{2});
+    const first = try builder.exp(input);
+    const second = try builder.log(first);
+    const third = try builder.exp(second);
+    const source = try builder.finish(.{ .returns = &.{third} });
+    const source_id = try program.add_function(source);
+
+    const provider_names = [_][]const u8{"provider"};
+    const wide_ops = [_]u32{ source.ops[0].id, source.ops[1].id };
+    const left_ops = [_]u32{source.ops[0].id};
+    const right_ops = [_]u32{source.ops[1].id};
+    var implementations = [_][1]kernel.ProviderCandidate{
+        .{.{ .provider_name = "provider", .artifact = .{ .data = @constCast("wide") } }},
+        .{.{ .provider_name = "provider", .artifact = .{ .data = @constCast("left") } }},
+        .{.{ .provider_name = "provider", .artifact = .{ .data = @constCast("right") } }},
+    };
+    var wide_samples = [_]Sample{.{ .unreplaced_ns = 100, .selected_ns = 60 }} ** 15;
+    var left_samples = [_]Sample{.{ .unreplaced_ns = 100, .selected_ns = 70 }} ** 15;
+    var right_samples = [_]Sample{.{ .unreplaced_ns = 100, .selected_ns = 70 }} ** 15;
+    var measurements = [_][1]Measurement{
+        .{.{ .measured = &wide_samples }},
+        .{.{ .measured = &left_samples }},
+        .{.{ .measured = &right_samples }},
+    };
+    const evaluated = [_]EvaluatedCandidate{
+        .{
+            .boundary = .{
+                .source_function = source_id,
+                .op_ids = &wide_ops,
+                .provider_names = &provider_names,
+            },
+            .callable = source,
+            .implementations = &implementations[0],
+            .measurements = &measurements[0],
+        },
+        .{
+            .boundary = .{
+                .source_function = source_id,
+                .op_ids = &left_ops,
+                .provider_names = &provider_names,
+            },
+            .callable = source,
+            .implementations = &implementations[1],
+            .measurements = &measurements[1],
+        },
+        .{
+            .boundary = .{
+                .source_function = source_id,
+                .op_ids = &right_ops,
+                .provider_names = &provider_names,
+            },
+            .callable = source,
+            .implementations = &implementations[2],
+            .measurements = &measurements[2],
+        },
+    };
+
+    var resolver = LocalResolver{};
+    var resolution = try resolver.interface().resolve(&program, &evaluated, testing.allocator);
+    defer resolution.deinit();
+    switch (resolution.decisions[0].implementation) {
+        .unreplaced => {},
+        .provider => return error.TestUnexpectedResult,
+    }
+    switch (resolution.decisions[1].implementation) {
+        .provider => {},
+        .unreplaced => return error.TestUnexpectedResult,
+    }
+    switch (resolution.decisions[2].implementation) {
+        .provider => {},
+        .unreplaced => return error.TestUnexpectedResult,
+    }
 }

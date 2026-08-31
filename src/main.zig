@@ -405,6 +405,15 @@ fn dispatch_pjrt_demo(
     switch (command) {
         .kernel_provider => |opts| {
             const providers = try parse_provider_kinds(opts.provider orelse "tvm");
+            const shape = try parse_shape(opts.shape orelse "128x128x128");
+            const dtype = std.meta.stringToEnum(zg.pr.DType, opts.dtype orelse "f32") orelse
+                return error.InvalidArgument;
+            if (dtype != .f16 and dtype != .bf16 and dtype != .f32)
+                return error.InvalidArgument;
+            const pattern = std.meta.stringToEnum(
+                demos.KernelProviderDemoPattern,
+                opts.pattern orelse "epilogue",
+            ) orelse return error.InvalidArgument;
             return try demos.run_kernel_provider_demo(
                 ctx,
                 client,
@@ -412,6 +421,11 @@ fn dispatch_pjrt_demo(
                 backend,
                 env.environ,
                 .{
+                    .m = shape.m,
+                    .n = shape.n,
+                    .k = shape.k,
+                    .dtype = dtype,
+                    .pattern = pattern,
                     .entry_label = "main",
                     .pr = outputs.pr,
                     .mlir = outputs.mlir,
@@ -653,5 +667,6 @@ fn parse_shape(s: []const u8) !MatmulShape {
     const m = try std.fmt.parseInt(i64, parts.next() orelse return error.InvalidShape, 10);
     const n = try std.fmt.parseInt(i64, parts.next() orelse return error.InvalidShape, 10);
     const k = try std.fmt.parseInt(i64, parts.next() orelse return error.InvalidShape, 10);
+    if (parts.next() != null or m <= 0 or n <= 0 or k <= 0) return error.InvalidShape;
     return .{ .m = m, .n = n, .k = k };
 }

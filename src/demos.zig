@@ -437,10 +437,21 @@ pub fn run_train_demo(
 
 /// Tunes, compiles, executes, and verifies the kernel-provider demo.
 ///
-/// A single provider discovers its PR candidates. Multi-provider runs use
-///  explicit disjoint requests. Tuning populates the kernel store before
-///  runtime preparation, PR kernelization, and PJRT execution.
-pub const KernelProviderDemoOutputs = struct {
+/// Providers discover PR candidates. Multi-provider epilogue runs use explicit
+///  disjoint requests. Tuning populates the kernel store before runtime
+///  preparation, PR kernelization, and PJRT execution.
+pub const KernelProviderDemoOptions = struct {
+    /// Matrix-product row count.
+    m: i64,
+    /// Matrix-product column count.
+    n: i64,
+    /// Matrix-product reduction size.
+    k: i64,
+    /// Element data type used by the candidate region.
+    dtype: zg.pr.DType,
+    /// Candidate graph family.
+    pattern: KernelProviderDemoPattern,
+
     /// Label attached to output produced for the selected function.
     entry_label: []const u8,
 
@@ -463,7 +474,7 @@ pub fn run_kernel_provider_demo(
     execution_template: *zg.pjrt.Execution,
     backend_template: *zg.pjrt.Backend,
     environ: *const std.process.Environ.Map,
-    outputs: KernelProviderDemoOutputs,
+    options: KernelProviderDemoOptions,
     provider_kinds: []const KernelProviderDemoKind,
 ) !void {
     const io = ctx.io;
@@ -521,7 +532,13 @@ pub fn run_kernel_provider_demo(
         );
         mirage_impl = zg.mirage.provider.MirageProvider.init(
             &mirage_dispatch,
-            .{ .runtime = mirage_config.runtime },
+            .{
+                .runtime = mirage_config.runtime,
+                .search = .{
+                    .preset = if (options.pattern == .mlp) .mlp else .default,
+                    .time_limit_seconds = 30,
+                },
+            },
         ) catch |err| {
             mirage_dispatch.deinit();
             return err;
@@ -554,39 +571,69 @@ pub fn run_kernel_provider_demo(
         &program,
         provider_names,
         provider_names.len > 1,
+        options.m,
+        options.n,
+        options.k,
+        options.dtype,
+        options.pattern,
     );
     try program.set_entry(entry);
+
+    var candidates = zg.kernel.Candidates.init(allocator);
+    defer candidates.deinit();
+    var extracted = zg.kernel.ExtractedCandidates.init(allocator);
+    defer extracted.deinit();
 
     var pipeline = zg.Pipeline.init(allocator);
     defer pipeline.deinit();
     try pipeline.add(zg.pr.Validate{});
-    if (outputs.pr) |selected| {
+    if (options.pr) |selected| {
         var config = selected;
-        config.entry_label = config.entry_label orelse outputs.entry_label;
+        config.entry_label = config.entry_label orelse options.entry_label;
         try pipeline.add(zg.pr.dump.Dump{ .config = config });
     }
-    try pipeline.add(zg.pr.transform.kernelize.DiscoverCandidates{ .providers = providers });
-    try pipeline.add(zg.pr.transform.kernelize.OutlineCandidates{});
+    try pipeline.add(zg.pr.transform.kernelize.DiscoverCandidates{
+        .providers = providers,
+        .candidates = &candidates,
+    });
+    try pipeline.add(zg.pr.transform.kernelize.ExtractCandidates{
+        .candidates = &candidates,
+        .extracted = &extracted,
+    });
     _ = try pipeline.run(*zg.pr.Program, &program, ctx);
 
-    var demo_evaluator: KernelProviderDemoEvaluator = .{};
-    var tune_result = try zg.tune.tune(io, allocator, &program, providers, .{
+    var candidate_factory = zg.pjrt.CandidateExecutableFactory{
+        .execution = execution_template,
+        .providers = providers,
+        .compile_options = backend_template.compiler.options,
+    };
+    var executable_measurer = zg.tune.ExecutableMeasurer{
+        .io = io,
+        .factory = candidate_factory.interface(),
+    };
+    var store = try zg.tune.tune(io, allocator, &program, providers, .{
         .device = execution_template.interface.device,
-        .evaluator = demo_evaluator.interface(),
+        .candidates = &extracted,
+        .measurer = executable_measurer.interface(),
     });
-    defer tune_result.deinit();
-    try tune_result.dispatch_registry.prepare(&tune_result.store, .{
+    defer store.deinit();
+
+    var dispatch_registry = zg.kernel.DispatchRegistry.init(allocator);
+    defer dispatch_registry.deinit();
+    try dispatch_registry.register_providers(providers);
+    try dispatch_registry.prepare(&store, .{
         .device = execution_template.interface.device,
     });
 
-    var report: ?zg.pr.transform.kernelize.Report = if (outputs.kernels != null)
+    var report: ?zg.pr.transform.kernelize.Report = if (options.kernels != null)
         .init(allocator)
     else
         null;
     defer if (report) |*value| value.deinit();
 
     var kernelize = zg.pr.transform.kernelize.KernelizePass{
-        .store = &tune_result.store,
+        .store = &store,
+        .candidates = &extracted,
         .device = execution_template.interface.device,
         .report = if (report) |*value| value else null,
     };
@@ -594,31 +641,31 @@ pub fn run_kernel_provider_demo(
     if (report) |*value| {
         try pipeline.add(zg.pr.transform.kernelize.DumpKernels{
             .report = value,
-            .target = outputs.kernels.?,
+            .target = options.kernels.?,
         });
     }
 
     try pipeline.add(zg.pr.transform.outline.Pass{});
     try pipeline.add(zg.mlir.stablehlo.Lower{
         .config = .{
-            .encoding = if (outputs.mlir == null) .binary else .text,
+            .encoding = if (options.mlir == null) .binary else .text,
         },
     });
-    if (outputs.mlir) |selected| {
+    if (options.mlir) |selected| {
         var config = selected;
-        config.entry_label = config.entry_label orelse outputs.entry_label;
+        config.entry_label = config.entry_label orelse options.entry_label;
         try pipeline.add(zg.stablehlo.Dump{ .config = config });
     }
 
     var execution = try zg.pjrt.Execution.init(client, device, .{
-        .store = &tune_result.store,
-        .dispatch_registry = &tune_result.dispatch_registry,
+        .store = &store,
+        .dispatch_registry = &dispatch_registry,
     });
     var backend = zg.pjrt.Backend.init(&execution, backend_template.compiler.options);
     try pipeline.add(&backend.interface);
-    if (outputs.optimized_hlo) |selected| {
+    if (options.optimized_hlo) |selected| {
         var config = selected;
-        config.entry_label = config.entry_label orelse outputs.entry_label;
+        config.entry_label = config.entry_label orelse options.entry_label;
         try pipeline.add(zg.pjrt.DumpOptimizedHlo{
             .execution = &execution,
             .config = config,
@@ -637,30 +684,13 @@ pub fn run_kernel_provider_demo(
         io,
         exe,
         provider_kinds.len,
+        options.m,
+        options.n,
+        options.k,
+        options.dtype,
+        options.pattern,
     );
 }
-
-const KernelProviderDemoEvaluator = struct {
-    fn interface(self: *KernelProviderDemoEvaluator) zg.tune.Evaluator {
-        return .{
-            .ptr = @ptrCast(self),
-            .evaluate_fn = evaluate,
-        };
-    }
-
-    fn evaluate(
-        _: *anyopaque,
-        _: zg.pr.Function,
-        candidates: []const zg.tune.AvailableCandidate,
-        _: zg.device.Device,
-        _: std.mem.Allocator,
-    ) zg.tune.EvaluationError!zg.tune.Evaluation {
-        return .{
-            .candidate = .{ .provider = candidates.len - 1 },
-            .reason = "kernel-provider dispatch demo requests the provider candidate",
-        };
-    }
-};
 
 fn kind_requested(kinds: []const KernelProviderDemoKind, target: KernelProviderDemoKind) bool {
     for (kinds) |k| if (k == target) return true;
@@ -673,27 +703,43 @@ fn run_kernel_provider_demo_executable(
     io: std.Io,
     loaded_program: zg.Executor.LoadedProgram,
     n_providers: usize,
+    m: i64,
+    n: i64,
+    k: i64,
+    dtype: zg.pr.DType,
+    pattern: KernelProviderDemoPattern,
 ) !void {
     const executor = loaded_program.executor;
-    const A = [_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 };
-    const B = [_]f32{ 7.0, 8.0, 9.0, 10.0, 11.0, 12.0 };
-    const C = [_]f32{ 2.0, 2.0, 2.0, 2.0 };
+    const a_shape = [_]i64{ m, k };
+    const b_shape = [_]i64{ k, n };
+    const c_shape = switch (pattern) {
+        .epilogue => [_]i64{ m, n },
+        .mlp => b_shape,
+    };
+    const output_shape = [_]i64{ m, n };
 
-    var host_a = try Tensor.host(.f32, &.{ 2, 3 }, .{ .borrow = std.mem.sliceAsBytes(&A) });
+    var host_a = try Tensor.host(dtype, &a_shape, .{ .alloc = allocator });
     defer host_a.deinit();
-    var host_b = try Tensor.host(.f32, &.{ 3, 2 }, .{ .borrow = std.mem.sliceAsBytes(&B) });
+    try fill_kernel_demo_tensor(
+        &host_a,
+        dtype,
+        if (pattern == .mlp) 1.0 / @as(f32, @floatFromInt(k)) else 1.0,
+    );
+    var host_b = try Tensor.host(dtype, &b_shape, .{ .alloc = allocator });
     defer host_b.deinit();
-    var host_c = try Tensor.host(.f32, &.{ 2, 2 }, .{ .borrow = std.mem.sliceAsBytes(&C) });
+    try fill_kernel_demo_tensor(&host_b, dtype, 1.0);
+    var host_c = try Tensor.host(dtype, &c_shape, .{ .alloc = allocator });
     defer host_c.deinit();
+    try fill_kernel_demo_tensor(&host_c, dtype, if (pattern == .mlp) 1.0 else 2.0);
 
-    const dev_a = try executor.upload(host_a.host_data(), .f32, host_a.dims());
+    const dev_a = try executor.upload(host_a.host_data(), dtype, host_a.dims());
     defer executor.release(dev_a);
-    const dev_b = try executor.upload(host_b.host_data(), .f32, host_b.dims());
+    const dev_b = try executor.upload(host_b.host_data(), dtype, host_b.dims());
     defer executor.release(dev_b);
-    const dev_c = try executor.upload(host_c.host_data(), .f32, host_c.dims());
+    const dev_c = try executor.upload(host_c.host_data(), dtype, host_c.dims());
     defer executor.release(dev_c);
 
-    var out_host = try Tensor.host(.f32, &.{ 2, 2 }, .{ .alloc = allocator });
+    var out_host = try Tensor.host(dtype, &output_shape, .{ .alloc = allocator });
     defer out_host.deinit();
 
     const t0 = std.Io.Timestamp.now(io, .awake);
@@ -714,28 +760,53 @@ fn run_kernel_provider_demo_executable(
     const dur = t0.untilNow(io, .awake);
     log.info("Executed dur={f}", .{dur});
 
-    // mm(A, B) = [[58, 64], [139, 154]]
-    // (n * mm(A, B) + C) * C = [[116n+4, 128n+4], [278n+4, 308n+4]]
-    const n = @as(f32, @floatFromInt(n_providers));
-    const expected = [_]f32{
-        116.0 * n + 4.0, 128.0 * n + 4.0,
-        278.0 * n + 4.0, 308.0 * n + 4.0,
+    const expected: f32 = switch (pattern) {
+        .epilogue => 2.0 * @as(f32, @floatFromInt(n_providers)) *
+            @as(f32, @floatFromInt(k)) + 4.0,
+        .mlp => 1.0 / (1.0 + @exp(-1.0)),
     };
-    const out = out_host.as_const_slice(f32);
-    std.debug.assert(out.len == 4);
-    for (out, 0..) |v, i| {
-        const diff = @abs(v - expected[i]);
-        if (diff > 1e-4) {
-            std.log.err("mismatch[{d}]: got {d}, expected {d}", .{ i, v, expected[i] });
-            return error.NumericalMismatch;
-        }
-    }
+    try verify_kernel_demo_tensor(out_host, dtype, expected);
     log.info("OK: output matches expected ({d} provider(s))", .{n_providers});
 }
 
+fn fill_kernel_demo_tensor(tensor: *Tensor, dtype: zg.pr.DType, value: f32) !void {
+    switch (dtype) {
+        .f16 => @memset(tensor.as_slice(u16), zg.pr.DType.f16.encode(f32, value)),
+        .bf16 => @memset(tensor.as_slice(u16), zg.pr.DType.bf16.encode(f32, value)),
+        .f32 => @memset(tensor.as_slice(f32), value),
+        else => return error.UnsupportedDType,
+    }
+}
+
+fn verify_kernel_demo_tensor(tensor: Tensor, dtype: zg.pr.DType, expected: f32) !void {
+    const tolerance: f32 = if (dtype == .f32) 1e-4 else 1e-2;
+    const len = tensor.host_data().len / dtype.size_in_bytes();
+    for (0..len) |index| {
+        const value: f32 = switch (dtype) {
+            .f16 => zg.pr.DType.f16.decode(f32, tensor.as_const_slice(u16)[index]),
+            .bf16 => zg.pr.DType.bf16.decode(f32, tensor.as_const_slice(u16)[index]),
+            .f32 => tensor.as_const_slice(f32)[index],
+            else => return error.UnsupportedDType,
+        };
+        if (@abs(value - expected) > tolerance) {
+            log.err("mismatch[{d}]: got {d}, expected {d}", .{ index, value, expected });
+            return error.NumericalMismatch;
+        }
+    }
+}
+
 pub const KernelProviderDemoKind = enum {
+    /// TVM TensorIR and MetaSchedule provider.
     tvm,
+    /// Mirage symbolic graph-search provider.
     mirage,
+};
+
+pub const KernelProviderDemoPattern = enum {
+    /// Matrix multiplication followed by elementwise arithmetic.
+    epilogue,
+    /// Two matrix multiplications joined by a SiLU gate.
+    mlp,
 };
 
 pub fn print_pr(
@@ -763,7 +834,7 @@ pub fn print_pr(
     try zg.pr.zxpr.emit(vjp_func, stdout, zg.pr.zxpr.style.config(.auto_stdout, .{ .truecolor_auto = tc }));
 }
 
-/// Returns true when `ZG_TRUECOLOR` is set to a non-empty value.
+/// Return true when `ZG_TRUECOLOR` is set to a non-empty value.
 ///
 /// Library styling code receives the decision from a caller with an explicit
 ///  environment map.
@@ -885,22 +956,40 @@ fn fill_pattern(slice: []f32, scale: f32, offset: f32) void {
     }
 }
 
-/// Builds the matmul program used by the kernel-provider demo.
+/// Builds the selected kernel-provider workload.
 ///
-/// The function returns one matrix product per provider, summed with `c`, then multiplied
-///  by `c`. Multi-provider runs use explicit disjoint requests because their
-///  discovered region boundaries may overlap.
+/// `epilogue` returns one matrix product per provider, summed with `c`, then
+///  multiplied by `c`. Multi-provider runs use explicit disjoint requests.
+/// `mlp` returns two matrix products joined by a SiLU gate.
 fn build_kernelized_demo_program(
     program: *zg.pr.Program,
     provider_names: []const []const u8,
     explicit_requests: bool,
+    m: i64,
+    n: i64,
+    k: i64,
+    dtype: zg.pr.DType,
+    pattern: KernelProviderDemoPattern,
 ) !zg.pr.FunctionId {
     var b = try zg.pr.FunctionBuilder.init(program, "main");
     defer b.deinit();
 
-    const a_id = try b.param_tensor(.f32, &.{ 2, 3 });
-    const b_id = try b.param_tensor(.f32, &.{ 3, 2 });
-    const c_id = try b.param_tensor(.f32, &.{ 2, 2 });
+    const a_id = try b.param_tensor(dtype, &.{ m, k });
+    const b_id = try b.param_tensor(dtype, &.{ k, n });
+    const c_id = try b.param_tensor(dtype, switch (pattern) {
+        .epilogue => &.{ m, n },
+        .mlp => &.{ k, n },
+    });
+
+    if (pattern == .mlp) {
+        const first = try b.mm(a_id, b_id);
+        const second = try b.mm(a_id, c_id);
+        const activation = try b.logistic(first);
+        const silu = try b.multiply(first, activation);
+        const output = try b.multiply(silu, second);
+        const func = try b.finish(.{ .returns = &.{output} });
+        return try program.add_function(func);
+    }
 
     // Region names share the program lifetime of their function references.
     const first_name = try std.fmt.allocPrint(b.alloc(), "{s}_region_0", .{provider_names[0]});

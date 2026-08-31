@@ -1,7 +1,7 @@
 //! TVM kernel provider.
 //!
 //! The provider accepts PR matrix-multiply functions and emits kernel artifacts
-//!  values through MetaSchedule autotuning. TVM C types are internal.
+//!  through MetaSchedule autotuning. TVM C types remain internal.
 const std = @import("std");
 const contraction = @import("../pr/analysis/contraction.zig");
 const pattern = @import("../pr/analysis/pattern.zig");
@@ -19,15 +19,20 @@ const TvmDispatchState = @import("dispatch.zig").TvmDispatchState;
 const log = std.log.scoped(.@"zg/tvm_provider");
 
 pub const TvmProvider = struct {
+    /// I/O context used by cache and tuning operations.
     io: std.Io,
+    /// Target compiler and linker configuration.
     compile_config: config.CompileConfig,
+    /// Persistent artifact and tuning cache.
     cache: Cache,
+    /// Maximum candidates measured for one cache miss.
     max_trials: u32 = 64,
+    /// Candidates submitted per tuning iteration.
     trials_per_iter: u32 = 16,
 
     /// Shared dispatch state owning the TVM module cache.
     ///
-    /// The state must outlive all artifacts produced by this provider.
+    /// The state must outlive runtime capabilities returned by this provider.
     dispatch_state: *TvmDispatchState,
 
     /// Inputs required to initialize a TVM provider.
@@ -44,9 +49,13 @@ pub const TvmProvider = struct {
 
     /// Initialize a provider after loading its configured TVM runtime.
     pub fn init(
+        /// I/O context used by cache and tuning operations.
         io: std.Io,
+        /// Persistent artifact and tuning cache.
         cache: Cache,
+        /// Runtime state shared by compiled artifacts.
         dispatch_state: *TvmDispatchState,
+        /// Compiler target and tuning limits.
         options: InitOptions,
     ) tvm_runtime.Error!TvmProvider {
         try tvm_runtime.ensure_loaded(.compiler);
@@ -60,22 +69,37 @@ pub const TvmProvider = struct {
         };
     }
 
-    /// Return a KernelProvider interface backed by this TvmProvider.
+    /// Return a `KernelProvider` backed by this provider state.
     pub fn kernel_provider(self: *TvmProvider) kernel.KernelProvider {
         return .{
             .name = "tvm",
-            .ptr = @ptrCast(self),
-            .compile_fn = compile_impl,
-            .match_fn = match_impl,
-            .prepare_fn = &TvmDispatchState.prepare,
-            .dispatch_fn = &TvmDispatchState.dispatch,
-            .dispatch_ctx = TypedPtr.init(self.dispatch_state),
+            .compiler = .{
+                .context = @ptrCast(self),
+                .vtable = &.{
+                    .compile = compile_impl,
+                    .discover = discover_impl,
+                },
+            },
+            .runtime = .{
+                .context = TypedPtr.init(self.dispatch_state),
+                .vtable = &.{
+                    .dispatch = &TvmDispatchState.dispatch,
+                    .prepare = &TvmDispatchState.prepare,
+                },
+            },
         };
     }
 
-    fn match_impl(_: *anyopaque, func: pr.Function, start: usize) ?kernel.Match {
-        if (start >= func.ops.len or validate_matmul_op(func.ops[start]) == null) return null;
-        return .{ .op_count = 1 };
+    fn discover_impl(
+        _: *anyopaque,
+        func: pr.Function,
+        matches: *std.ArrayList(kernel.Match),
+        allocator: std.mem.Allocator,
+    ) kernel.DiscoverError!void {
+        for (func.ops, 0..) |op, op_index| {
+            if (validate_matmul_op(op) == null) continue;
+            try matches.append(allocator, .{ .start = op_index, .end = op_index + 1 });
+        }
     }
 
     fn compile_impl(ptr: *anyopaque, func: pr.Function, selected_device: device.Device, allocator: std.mem.Allocator) kernel.CompileError!kernel.Artifact {
@@ -217,7 +241,7 @@ fn make_kernel_artifact(artifact: mm.CachedArtifact) kernel.Artifact {
     };
 }
 
-test "TVM matcher recognizes matrix matmul" {
+test "TVM discovery recognizes matrix matmul" {
     const testing = std.testing;
     var program = pr.Program.init(testing.allocator);
     defer program.deinit();
@@ -228,7 +252,12 @@ test "TVM matcher recognizes matrix matmul" {
     const output = try builder.mm(lhs, rhs);
     const func = try builder.finish(.{ .returns = &.{output} });
 
-    const matched = TvmProvider.match_impl(undefined, func, 0) orelse
-        return error.TestUnexpectedResult;
-    try testing.expectEqual(@as(usize, 1), matched.op_count);
+    var matches = std.ArrayList(kernel.Match).empty;
+    defer matches.deinit(testing.allocator);
+    try TvmProvider.discover_impl(undefined, func, &matches, testing.allocator);
+    try testing.expectEqualSlices(
+        kernel.Match,
+        &.{pattern.Range{ .start = 0, .end = 1 }},
+        matches.items,
+    );
 }

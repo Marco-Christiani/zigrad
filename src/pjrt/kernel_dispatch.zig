@@ -6,7 +6,6 @@ const device = @import("../device.zig");
 const kernel = @import("../kernel.zig");
 const stablehlo = @import("../stablehlo.zig");
 const pjrt_api = @import("../c/pjrt/api.zig");
-const TypedPtr = @import("../utils/rtti.zig").TypedPtr;
 const c = @import("../c/pjrt/c.zig").c;
 
 const log = std.log.scoped(.@"zg/pjrt_kernel_dispatch");
@@ -285,7 +284,7 @@ fn lookup_store_from_context(frame: *c.XLA_FFI_CallFrame) ?*const kernel.KernelS
     return @ptrCast(@alignCast(data_ptr));
 }
 
-fn lookup_dispatch_registry_new_from_context(frame: *c.XLA_FFI_CallFrame) ?*const kernel.DispatchRegistry {
+fn lookup_dispatch_registry_from_context(frame: *c.XLA_FFI_CallFrame) ?*const kernel.DispatchRegistry {
     if (!dispatch_dispatch_registry_type.registered) return null;
     const data_ptr = lookup_dispatch_user_data_from_context(frame, dispatch_dispatch_registry_type.id) orelse return null;
     return @ptrCast(@alignCast(data_ptr));
@@ -300,9 +299,9 @@ fn lookup_platform_from_context(frame: *c.XLA_FFI_CallFrame) ?device.Platform {
 
 /// Generic kernel dispatch handler invoked by the XLA FFI framework.
 ///
-/// Extracts the selection key from the custom-call payload, looks up the artifact
-///  in the registry, builds a provider-agnostic DispatchContext from the
-///  FFI frame, and delegates to `artifact.dispatch()`.
+/// Extracts the selection key from the custom-call payload, loads the selected
+///  artifact from the kernel store, builds a `DispatchContext`, and invokes the
+///  provider runtime registered for that artifact.
 fn kernel_dispatch_handler(frame: *c.XLA_FFI_CallFrame) callconv(.c) ?*c.XLA_FFI_Error {
     if (handle_metadata_registration_hook(frame)) return null;
 
@@ -323,58 +322,47 @@ fn kernel_dispatch_handler(frame: *c.XLA_FFI_CallFrame) callconv(.c) ?*c.XLA_FFI
 
     switch (selection.candidate) {
         .provider => |stored| {
-            const dreg = lookup_dispatch_registry_new_from_context(frame);
-            return dispatch_from_store(frame, stored, dreg, kernel_key);
+            const registry = lookup_dispatch_registry_from_context(frame);
+            return dispatch_from_store(frame, stored, registry, kernel_key);
         },
-        .original => {
-            return make_ffi_error(frame, "zigrad kernel dispatch: store selected the original candidate for key", c.XLA_FFI_Error_Code_NOT_FOUND);
+        .unreplaced => {
+            return make_ffi_error(frame, "zigrad kernel dispatch: store left the callable unreplaced", c.XLA_FFI_Error_Code_NOT_FOUND);
         },
     }
 }
 
-/// Dispatch from store-based path: resolve provider dispatch function from DispatchRegistry.
+/// Resolve the selected provider runtime and dispatch its artifact.
 fn dispatch_from_store(
     frame: *c.XLA_FFI_CallFrame,
     stored: kernel.ProviderCandidate,
-    dreg: ?*const kernel.DispatchRegistry,
+    registry: ?*const kernel.DispatchRegistry,
     kernel_key: []const u8,
 ) ?*c.XLA_FFI_Error {
-    const dispatch_entry = if (dreg) |reg| reg.get(stored.provider_name) else null;
-    if (dispatch_entry == null) {
-        log.err("store dispatch: no dispatch entry for provider '{s}'", .{stored.provider_name});
+    const runtime = if (registry) |registered| registered.get(stored.provider_name) else null;
+    if (runtime == null) {
+        log.err("store dispatch: no runtime for provider '{s}'", .{stored.provider_name});
         return make_ffi_error(frame, "zigrad kernel dispatch: provider not in dispatch registry", c.XLA_FFI_Error_Code_FAILED_PRECONDITION);
     }
-    const entry = dispatch_entry.?;
 
     return execute_dispatch(
         frame,
         kernel_key,
         stored.artifact.workspace_bytes,
         stored.artifact.workspace_alignment,
-        entry.dispatch_fn,
-        entry.dispatch_ctx,
+        runtime.?,
         stored.artifact.data,
     );
 }
 
-/// Extract buffers, allocate workspace, and call a provider dispatch function.
+/// Extract buffers, allocate workspace, and invoke a provider runtime.
 fn execute_dispatch(
     frame: *c.XLA_FFI_CallFrame,
     dispatch_key: []const u8,
     workspace_bytes: usize,
     workspace_alignment: usize,
-    dispatch_fn: ?kernel.DispatchFn,
-    dispatch_ctx: ?TypedPtr,
+    runtime: kernel.ProviderRuntime,
     artifact_data: []const u8,
 ) ?*c.XLA_FFI_Error {
-    const dfn = dispatch_fn orelse {
-        return make_ffi_error(frame, "zigrad kernel dispatch: no dispatch function", c.XLA_FFI_Error_Code_FAILED_PRECONDITION);
-    };
-    const dctx = dispatch_ctx orelse {
-        return make_ffi_error(frame, "zigrad kernel dispatch: no dispatch context", c.XLA_FFI_Error_Code_FAILED_PRECONDITION);
-    };
-
-    // Extract all input and output buffers from the FFI frame.
     var input_descs: [16]kernel.BufferDesc = undefined;
     const num_inputs = extract_buffers(frame.args.size, frame.args.types, frame.args.args, &input_descs) orelse {
         return make_ffi_error(frame, "zigrad kernel dispatch: failed to extract input buffers", c.XLA_FFI_Error_Code_INVALID_ARGUMENT);
@@ -420,7 +408,7 @@ fn execute_dispatch(
         .allocator = std.heap.c_allocator,
     };
 
-    dfn(dctx, artifact_data, dispatch_key, ctx) catch |err| {
+    runtime.dispatch(artifact_data, dispatch_key, ctx) catch |err| {
         log.err("kernel dispatch failed for '{s}': {s}", .{ dispatch_key, @errorName(err) });
         return dispatch_error_to_ffi(frame, err);
     };

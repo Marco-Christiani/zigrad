@@ -119,6 +119,8 @@ char const *preset_name(zg_mirage_search_preset_t preset) {
     return "attention";
   case ZG_MIRAGE_SEARCH_LORA:
     return "lora";
+  case ZG_MIRAGE_SEARCH_MLP:
+    return "mlp";
   default:
     return nullptr;
   }

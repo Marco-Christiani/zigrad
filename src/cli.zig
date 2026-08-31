@@ -59,6 +59,12 @@ pub const TvmRenderOpts = struct {
 pub const KernelProviderDemoOpts = struct {
     /// Comma-separated provider names.
     provider: ?[]const u8 = "tvm",
+    /// Matmul dimensions in MxNxK form.
+    shape: ?[]const u8 = "128x128x128",
+    /// Element data type used by the candidate region.
+    dtype: ?[]const u8 = "f32",
+    /// Candidate graph family.
+    pattern: ?[]const u8 = "epilogue",
 };
 
 /// Terminal backend used by an executable demo.
@@ -157,7 +163,7 @@ pub const PjrtCommand = union(enum) {
     cache: CacheCommand,
 };
 
-/// Executable scenarios that exercise current Zigrad capabilities.
+/// Executable Zigrad demos.
 pub const DemoCommand = union(enum) {
     basic: DemoOpts,
     custom_call_negative: DemoOpts,

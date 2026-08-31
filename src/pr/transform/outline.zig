@@ -2,6 +2,7 @@
 const std = @import("std");
 const compilation = @import("../../compilation.zig");
 const pr = @import("../pr.zig");
+const pattern = @import("../analysis/pattern.zig");
 const region_view = @import("../analysis/region_view.zig");
 
 const Allocator = std.mem.Allocator;
@@ -16,7 +17,10 @@ pub const annotation: pr.Annotation = .{
 };
 
 /// Invalid payloads for the outline annotation contract.
-pub const AnnotationError = error{InvalidOutlineAnnotation};
+pub const AnnotationError = error{
+    /// The annotation value is not a supported outline request.
+    InvalidOutlineAnnotation,
+};
 
 /// Return whether a region requests outlining.
 pub fn is_requested(region: pr.Region) AnnotationError!bool {
@@ -32,10 +36,34 @@ pub fn is_requested(region: pr.Region) AnnotationError!bool {
 pub const ApplyOptions = struct {
     /// Unique name assigned to the outlined function.
     ///
-    /// A null value derives a name from the caller and region id.
+    /// Null derives a name from the caller and region id.
     function_name: ?[]const u8 = null,
     /// Annotations attached to the outlined function.
     function_annotations: []const pr.Annotation = &.{},
+};
+
+/// Configuration for extracting one operation range.
+pub const ExtractOptions = struct {
+    /// Unique name assigned to the extracted function.
+    ///
+    /// Null derives a name from the caller and operation range.
+    function_name: ?[]const u8 = null,
+    /// Annotations attached to the extracted function.
+    function_annotations: []const pr.Annotation = &.{},
+    /// Source region omitted from copied metadata. Null omits no region.
+    source_region: ?u32 = null,
+    /// Validate the complete program after extraction. A caller that disables
+    ///  this check must validate after composing its mutations.
+    validate: bool = true,
+};
+
+/// Configuration for replacing one operation range with a call.
+pub const ReplaceOptions = struct {
+    /// Source region removed with the operations. Null removes no region.
+    source_region: ?u32 = null,
+    /// Validate the complete program after replacement. A caller that disables
+    ///  this check must validate after composing its mutations.
+    validate: bool = true,
 };
 
 /// Location of the function and call produced by outlining.
@@ -46,15 +74,24 @@ pub const ApplyResult = struct {
     call_op_id: u32,
 };
 
-/// Structural and allocation failures produced by region outlining.
+/// Structural and allocation failures produced by range outlining.
 pub const ApplyError = pr.BuildError || pr.FunctionRegistrationError || error{
+    /// The selected function does not exist.
     FunctionIdOutOfRange,
+    /// The selected region does not exist.
     RegionNotFound,
+    /// The selected region contains no operations.
     EmptyRegion,
+    /// A selected region operation does not exist in its function.
     UnknownRegionOperation,
+    /// Selected region operations do not form one contiguous range.
     NonContiguousRegion,
+    /// A retained nested region partially overlaps the selected range.
     PartialRegionOverlap,
+    /// Rebuilding referenced a source value before binding its replacement.
     MissingValueMapping,
+    /// The selected range is empty or outside its function.
+    InvalidOperationRange,
 };
 
 const OpRange = struct {
@@ -62,8 +99,85 @@ const OpRange = struct {
     end: usize,
 };
 
+/// Extract an operation range into a callable function without changing its caller.
+pub fn extract_range(
+    /// Program that owns the source and extracted functions.
+    program: *pr.Program,
+    /// Allocator used for temporary maps and boundary analysis.
+    scratch: Allocator,
+    /// Function containing `range`.
+    function_id: pr.FunctionId,
+    /// Nonempty operation range to extract.
+    range: pattern.Range,
+    /// Naming, annotations, and nested-region handling.
+    opts: ExtractOptions,
+) ApplyError!pr.FunctionId {
+    const source = program.get_function_by_id(function_id) orelse
+        return error.FunctionIdOutOfRange;
+    if (range.start >= range.end or range.end > source.ops.len)
+        return error.InvalidOperationRange;
+
+    const saved = program.checkpoint_appends();
+    errdefer program.restore_appends(saved);
+
+    const generated_base = if (opts.function_name == null)
+        try std.fmt.allocPrint(
+            scratch,
+            "{s}_candidate_{d}_{d}",
+            .{ source.name, range.start, range.end },
+        )
+    else
+        null;
+    defer if (generated_base) |name| scratch.free(name);
+    const function_name = opts.function_name orelse
+        try program.reserve_unique_function_name(generated_base.?);
+    if (program.get_function_id(function_name) != null)
+        return error.DuplicateFunctionName;
+
+    const op_ids = try scratch.alloc(u32, range.len());
+    defer scratch.free(op_ids);
+    for (source.ops[range.start..range.end], op_ids) |op, *op_id|
+        op_id.* = op.id;
+    const target = pr.Region{
+        .id = std.math.maxInt(u32),
+        .name = function_name,
+        .annotations = &.{},
+        .op_ids = op_ids,
+    };
+    const desc = try region_view.describe(scratch, source, target);
+    defer desc.deinit(scratch);
+
+    const callee_op_ids = try scratch.alloc(?u32, source.ops.len);
+    defer scratch.free(callee_op_ids);
+    @memset(callee_op_ids, null);
+
+    const op_range = OpRange{ .start = range.start, .end = range.end };
+    var extracted = try build_outlined_function(
+        program,
+        scratch,
+        source,
+        desc,
+        op_range,
+        function_name,
+        opts.function_annotations,
+        callee_op_ids,
+    );
+    extracted.regions = try build_outlined_regions(
+        program.allocator(),
+        source,
+        opts.source_region,
+        op_range,
+        callee_op_ids,
+    );
+
+    const extracted_id = try program.add_function(extracted);
+    if (opts.validate) try pr.validate_program(program);
+    return extracted_id;
+}
+
 /// Dense source-to-replacement variable map used while rebuilding a function.
 const VarRemap = struct {
+    /// Owns `replacements` and slices returned by allocation methods.
     allocator: Allocator,
     /// Replacement values indexed by source variable id. Null marks an
     ///  unbound source variable.
@@ -76,6 +190,7 @@ const VarRemap = struct {
         return .{ .allocator = allocator, .replacements = replacements };
     }
 
+    /// Release replacement storage.
     fn deinit(self: VarRemap) void {
         self.allocator.free(self.replacements);
     }
@@ -120,13 +235,17 @@ const VarRemap = struct {
 
 /// Outline one region into a PR function and replace its operations with a call.
 ///
-/// `scratch` backs temporary maps only. The program arena owns the resulting
-///  function, call, annotations, and remapped regions.
+/// The program arena owns the resulting function, call, annotations, and remapped regions.
 pub fn apply(
+    /// Program containing the selected region.
     program: *pr.Program,
+    /// Allocator used for temporary maps and boundary analysis.
     scratch: Allocator,
+    /// Function containing the selected region.
     function_id: pr.FunctionId,
+    /// Region to outline and replace.
     region_id: u32,
+    /// Naming and annotation configuration.
     opts: ApplyOptions,
 ) ApplyError!ApplyResult {
     const source = program.get_function_by_id(function_id) orelse return error.FunctionIdOutOfRange;
@@ -143,14 +262,7 @@ pub fn apply(
         try program.reserve_unique_function_name(generated_base.?);
     if (program.get_function_id(function_name) != null) return error.DuplicateFunctionName;
     const target_range = try region_range(source, target);
-
-    for (source.regions) |region| {
-        const candidate_range = try region_range(source, region);
-        if (region.id == target.id or ranges_disjoint(target_range, candidate_range)) continue;
-        if (range_contains(target_range, candidate_range)) continue;
-        if (range_contains(candidate_range, target_range)) continue;
-        return error.PartialRegionOverlap;
-    }
+    try validate_region_overlaps(source, target_range, target.id);
 
     const desc = try region_view.describe(scratch, source, target);
     defer desc.deinit(scratch);
@@ -172,16 +284,64 @@ pub fn apply(
     outlined.regions = try build_outlined_regions(
         program.allocator(),
         source,
-        target,
+        target.id,
         target_range,
         callee_op_ids,
     );
 
+    const outlined_id = try program.add_function(outlined);
+    const call_op_id = try replace_range(
+        program,
+        scratch,
+        function_id,
+        .{ .start = target_range.start, .end = target_range.end },
+        outlined_id,
+        .{ .source_region = target.id },
+    );
+    return .{
+        .function_id = outlined_id,
+        .call_op_id = call_op_id,
+    };
+}
+
+/// Replace an operation range with a call to an existing function.
+pub fn replace_range(
+    /// Program containing the caller and callee.
+    program: *pr.Program,
+    /// Allocator used for temporary maps and boundary analysis.
+    scratch: Allocator,
+    /// Function containing `range`.
+    function_id: pr.FunctionId,
+    /// Nonempty operation range to replace.
+    range: pattern.Range,
+    /// Registered function whose signature matches the range boundary.
+    callee_id: pr.FunctionId,
+    /// Nested-region handling for the removed operations.
+    opts: ReplaceOptions,
+) ApplyError!u32 {
+    const source = program.get_function_by_id(function_id) orelse
+        return error.FunctionIdOutOfRange;
+    if (range.start >= range.end or range.end > source.ops.len)
+        return error.InvalidOperationRange;
+    const target_range = OpRange{ .start = range.start, .end = range.end };
+    try validate_region_overlaps(source, target_range, opts.source_region);
+
+    const op_ids = try scratch.alloc(u32, range.len());
+    defer scratch.free(op_ids);
+    for (source.ops[range.start..range.end], op_ids) |op, *op_id|
+        op_id.* = op.id;
+    const target = pr.Region{
+        .id = opts.source_region orelse std.math.maxInt(u32),
+        .name = source.name,
+        .annotations = &.{},
+        .op_ids = op_ids,
+    };
+    const desc = try region_view.describe(scratch, source, target);
+    defer desc.deinit(scratch);
+
     const caller_op_ids = try scratch.alloc(?u32, source.ops.len);
     defer scratch.free(caller_op_ids);
     @memset(caller_op_ids, null);
-
-    const outlined_id = try program.add_function(outlined);
 
     var caller = try build_caller_function(
         program,
@@ -189,7 +349,7 @@ pub fn apply(
         source,
         desc,
         target_range,
-        outlined_id,
+        callee_id,
         caller_op_ids,
     );
     const call_op_id = caller_op_ids[target_range.start].?;
@@ -197,7 +357,7 @@ pub fn apply(
     caller.regions = try build_caller_regions(
         program.allocator(),
         source,
-        target,
+        opts.source_region,
         target_range,
         call_op_id,
         caller_op_ids,
@@ -205,11 +365,8 @@ pub fn apply(
 
     program.replace_function(function_id, caller) catch unreachable;
     errdefer program.replace_function(function_id, source) catch unreachable;
-    try pr.validate_program(program);
-    return .{
-        .function_id = outlined_id,
-        .call_op_id = call_op_id,
-    };
+    if (opts.validate) try pr.validate_program(program);
+    return call_op_id;
 }
 
 /// Compilation operation that consumes explicit outline annotations.
@@ -287,6 +444,21 @@ fn region_range(func: pr.Function, region: pr.Region) ApplyError!OpRange {
         if (func.ops[start + offset].id != op_id) return error.NonContiguousRegion;
     }
     return .{ .start = start, .end = end };
+}
+
+fn validate_region_overlaps(
+    source: pr.Function,
+    target_range: OpRange,
+    source_region: ?u32,
+) ApplyError!void {
+    for (source.regions) |region| {
+        if (region.id == source_region) continue;
+        const candidate_range = try region_range(source, region);
+        if (ranges_disjoint(target_range, candidate_range)) continue;
+        if (range_contains(target_range, candidate_range)) continue;
+        if (range_contains(candidate_range, target_range)) continue;
+        return error.PartialRegionOverlap;
+    }
 }
 
 fn ranges_disjoint(lhs: OpRange, rhs: OpRange) bool {
@@ -380,13 +552,13 @@ fn build_caller_function(
 fn build_outlined_regions(
     arena: Allocator,
     source: pr.Function,
-    target: pr.Region,
+    excluded_region_id: ?u32,
     target_range: OpRange,
     op_ids: []const ?u32,
 ) ApplyError![]const pr.Region {
     var regions = std.ArrayList(pr.Region).empty;
     for (source.regions) |region| {
-        if (region.id == target.id) continue;
+        if (region.id == excluded_region_id) continue;
         const candidate_range = try region_range(source, region);
         if (!range_contains(target_range, candidate_range)) continue;
         try regions.append(arena, try remap_region(arena, source, region, op_ids, null));
@@ -397,14 +569,14 @@ fn build_outlined_regions(
 fn build_caller_regions(
     arena: Allocator,
     source: pr.Function,
-    target: pr.Region,
+    source_region: ?u32,
     target_range: OpRange,
     call_op_id: u32,
     op_ids: []const ?u32,
 ) ApplyError![]const pr.Region {
     var regions = std.ArrayList(pr.Region).empty;
     for (source.regions) |region| {
-        if (region.id == target.id) continue;
+        if (region.id == source_region) continue;
         const candidate_range = try region_range(source, region);
         if (range_contains(target_range, candidate_range)) continue;
         const replacement = if (range_contains(candidate_range, target_range)) call_op_id else null;

@@ -134,7 +134,7 @@ pub const Header = struct {
     /// Raw reflected schema fingerprint found in the payload.
     schema_hash: u64,
 
-    /// Whether the current serializer can decode the payload.
+    /// Return whether this build can decode the payload.
     pub fn is_supported(self: Header) bool {
         self.validate() catch return false;
         return true;
@@ -761,7 +761,7 @@ test "binary PR round trip is byte stable" {
     const region = parsed.functions()[0].regions[0];
     try std.testing.expectEqualStrings("serialized", region.name);
     try std.testing.expect(try @import("transform/outline.zig").is_requested(region));
-    const providers = (try @import("../kernel.zig").requested_providers(region)).?;
+    const providers = (try @import("../kernel.zig").requested_providers(region.annotations)).?;
     try std.testing.expectEqual(@as(usize, 2), providers.len());
     try std.testing.expectEqualStrings("first", providers.at(0));
     try std.testing.expectEqualStrings("second", providers.at(1));

@@ -53,6 +53,7 @@ pub const binary_pow = C.ZG_MIRAGE_BINARY_POW;
 pub const search_default = C.ZG_MIRAGE_SEARCH_DEFAULT;
 pub const search_attention = C.ZG_MIRAGE_SEARCH_ATTENTION;
 pub const search_lora = C.ZG_MIRAGE_SEARCH_LORA;
+pub const search_mlp = C.ZG_MIRAGE_SEARCH_MLP;
 
 pub const arg_input = C.ZG_MIRAGE_ARG_INPUT;
 pub const arg_output = C.ZG_MIRAGE_ARG_OUTPUT;

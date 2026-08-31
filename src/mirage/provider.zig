@@ -11,7 +11,8 @@ const mirage = @import("../c/mirage/api.zig");
 const TypedPtr = @import("../utils/rtti.zig").TypedPtr;
 
 const log = std.log.scoped(.@"zg/mirage_provider");
-const max_function_ops: usize = 5;
+const gated_mlp_op_count: usize = 5;
+const max_function_ops: usize = gated_mlp_op_count;
 
 // Alignment required by offsets in Mirage DTensor workspace plans.
 //
@@ -20,53 +21,93 @@ const max_function_ops: usize = 5;
 const workspace_alignment: usize = 128;
 
 pub const MirageProvider = struct {
+    /// Runtime state used to dispatch generated CUDA artifacts.
     dispatch_state: *dispatch_mod.MirageDispatchState,
+    /// Symbolic-search configuration used during compilation.
+    search: SearchOptions,
+
+    pub const SearchOptions = struct {
+        /// Named upstream search configuration.
+        preset: mirage.SearchPreset = .default,
+        /// Search limit in seconds. A non-positive value uses Mirage's default.
+        time_limit_seconds: f64 = 0,
+    };
 
     pub const InitOptions = struct {
         /// Mirage adapter loading policy.
         runtime: config.RuntimeConfig = .{},
+        /// Symbolic-search policy.
+        search: SearchOptions = .{},
     };
 
     /// Initialize the provider and load its adapter dependency.
     pub fn init(
+        /// Runtime state retained by the returned provider.
         dispatch_state: *dispatch_mod.MirageDispatchState,
+        /// Adapter loading and symbolic-search configuration.
         options: InitOptions,
     ) mirage.MirageError!MirageProvider {
         try mirage.load_runtime(options.runtime.adapter.path);
         return .{
             .dispatch_state = dispatch_state,
+            .search = options.search,
         };
     }
 
+    /// Return a `KernelProvider` backed by this provider state.
     pub fn kernel_provider(self: *MirageProvider) kernel.KernelProvider {
         return .{
             .name = "mirage",
-            .ptr = @ptrCast(self),
-            .compile_fn = compile_impl,
-            .match_fn = match_impl,
-            .dispatch_fn = &dispatch_mod.MirageDispatchState.dispatch,
-            .dispatch_ctx = TypedPtr.init(self.dispatch_state),
+            .compiler = .{
+                .context = @ptrCast(self),
+                .vtable = &.{
+                    .compile = compile_impl,
+                    .discover = discover_impl,
+                },
+            },
+            .runtime = .{
+                .context = TypedPtr.init(self.dispatch_state),
+                .vtable = &.{
+                    .dispatch = &dispatch_mod.MirageDispatchState.dispatch,
+                },
+            },
         };
     }
 
-    fn match_impl(_: *anyopaque, func: pr.Function, start: usize) ?kernel.Match {
-        const matched = pattern.connected_range(func, start, .{
+    fn discover_impl(
+        _: *anyopaque,
+        func: pr.Function,
+        matches: *std.ArrayList(kernel.Match),
+        allocator: std.mem.Allocator,
+    ) kernel.DiscoverError!void {
+        for (0..func.ops.len) |root| {
+            if (match_gated_mlp(func, root)) |matched|
+                try append_unique_match(matches, allocator, matched);
+        }
+        for (0..func.ops.len) |start| {
+            const matched = match_connected(func, start) orelse continue;
+            try append_unique_match(matches, allocator, matched);
+        }
+    }
+
+    fn match_connected(func: pr.Function, start: usize) ?kernel.Match {
+        return pattern.connected_range(func, start, .{
             .accepts = is_supported_op,
             .contains = is_supported_matmul,
             .max_ops = max_function_ops,
-        }) orelse return null;
-        return .{ .op_count = matched.len() };
+        });
     }
 
     fn compile_impl(ptr: *anyopaque, func: pr.Function, selected_device: device.Device, allocator: std.mem.Allocator) kernel.CompileError!kernel.Artifact {
-        _ = ptr;
-        return try compile(func, selected_device, allocator);
+        const self: *MirageProvider = @ptrCast(@alignCast(ptr));
+        return try compile(func, selected_device, allocator, self.search);
     }
 
     fn compile(
         func: pr.Function,
         selected_device: device.Device,
         allocator: std.mem.Allocator,
+        search: SearchOptions,
     ) kernel.CompileError!kernel.Artifact {
         if (!selected_device.platform.eql(.cuda)) return error.Unsupported;
         if (func.ops.len > max_function_ops) {
@@ -90,6 +131,7 @@ pub const MirageProvider = struct {
             selected_device,
             allocator,
             graph,
+            search,
         );
     }
 
@@ -99,12 +141,16 @@ pub const MirageProvider = struct {
         selected_device: device.Device,
         allocator: std.mem.Allocator,
         graph: *mirage.Graph,
+        search: SearchOptions,
     ) kernel.CompileError!kernel.Artifact {
         const mirage_device = mirage.Device.init(selected_device.ordinal) catch |err|
             return map_mirage_api_error(err);
         defer mirage_device.deinit();
 
-        const optimize_opts: mirage.OptimizeOptions = .{};
+        const optimize_opts = mirage.OptimizeOptions{
+            .preset = search.preset,
+            .time_limit_seconds = search.time_limit_seconds,
+        };
 
         const optimized = mirage.optimize(mirage_device, graph, &optimize_opts) catch |err| {
             if (err == error.MirageApiUnsupported) {
@@ -206,6 +252,17 @@ pub const MirageProvider = struct {
     }
 };
 
+fn append_unique_match(
+    matches: *std.ArrayList(kernel.Match),
+    allocator: std.mem.Allocator,
+    matched: kernel.Match,
+) std.mem.Allocator.Error!void {
+    for (matches.items) |existing| {
+        if (existing.start == matched.start and existing.end == matched.end) return;
+    }
+    try matches.append(allocator, matched);
+}
+
 fn is_supported_matmul(op: *const pr.Op) bool {
     if (op.inputs.len != 2 or op.outputs.len != 1) return false;
     return switch (op.params) {
@@ -287,6 +344,40 @@ const SiluMatch = struct {
     input: *const pr.Var,
     output: *const pr.Var,
 };
+
+const gated_mlp_pattern = pattern.Graph{
+    .nodes = &.{
+        .{ .operation = .{ .primitive = .mm, .input_count = 2, .output_count = 1 } },
+        .{ .operation = .{ .primitive = .mm, .input_count = 2, .output_count = 1 } },
+        .{
+            .operation = .{ .primitive = .logistic, .input_count = 1, .output_count = 1 },
+            .inputs = &.{.{ .node_output = .{ .node = 0 } }},
+        },
+        .{
+            .operation = .{ .primitive = .multiply, .input_count = 2, .output_count = 1 },
+            .inputs = &.{
+                .{ .node_output = .{ .node = 0 } },
+                .{ .node_output = .{ .node = 2 } },
+            },
+            .input_order = .unordered,
+        },
+        .{
+            .operation = .{ .primitive = .multiply, .input_count = 2, .output_count = 1 },
+            .inputs = &.{
+                .{ .node_output = .{ .node = 3 } },
+                .{ .node_output = .{ .node = 1 } },
+            },
+            .input_order = .unordered,
+        },
+    },
+    .root = 4,
+};
+
+fn match_gated_mlp(func: pr.Function, root: usize) ?pattern.Range {
+    var captures: [gated_mlp_op_count]?*const pr.Op = undefined;
+    if (!gated_mlp_pattern.match(func.ops[root], &captures)) return null;
+    return pattern.dense_range(func, &captures);
+}
 
 fn match_silu(func: pr.Function, start: usize) ?SiluMatch {
     _ = pattern.sequence(func, start, &.{
@@ -395,11 +486,20 @@ fn emit_binary(
 
 fn dtype_to_mirage(dtype: pr.DType) ?mirage.DType {
     return switch (dtype) {
+        .f16 => .f16,
         .bf16 => .bf16,
         .f32 => .f32,
         .f64 => .f64,
         else => null,
     };
+}
+
+test dtype_to_mirage {
+    try std.testing.expectEqual(mirage.DType.f16, dtype_to_mirage(.f16));
+    try std.testing.expectEqual(mirage.DType.bf16, dtype_to_mirage(.bf16));
+    try std.testing.expectEqual(mirage.DType.f32, dtype_to_mirage(.f32));
+    try std.testing.expectEqual(mirage.DType.f64, dtype_to_mirage(.f64));
+    try std.testing.expectEqual(@as(?mirage.DType, null), dtype_to_mirage(.i32));
 }
 
 fn map_mirage_api_error(err: mirage.MirageError) kernel.CompileError {
@@ -413,7 +513,7 @@ fn map_mirage_api_error(err: mirage.MirageError) kernel.CompileError {
     };
 }
 
-test "Mirage matcher grows a connected supported region" {
+test "Mirage discovery grows a connected supported region" {
     const testing = std.testing;
     var program = pr.Program.init(testing.allocator);
     defer program.deinit();
@@ -427,12 +527,12 @@ test "Mirage matcher grows a connected supported region" {
     const output = try builder.exp(sum);
     const func = try builder.finish(.{ .returns = &.{output} });
 
-    const matched = MirageProvider.match_impl(undefined, func, 0) orelse
+    const matched = MirageProvider.match_connected(func, 0) orelse
         return error.TestUnexpectedResult;
-    try testing.expectEqual(@as(usize, 3), matched.op_count);
+    try testing.expectEqual(@as(usize, 3), matched.len());
 }
 
-test "Mirage matcher covers pointwise prefixes and connected branches" {
+test "Mirage discovery covers pointwise prefixes and connected branches" {
     const testing = std.testing;
 
     {
@@ -446,9 +546,9 @@ test "Mirage matcher covers pointwise prefixes and connected branches" {
         const output = try builder.mm(transformed, rhs);
         const func = try builder.finish(.{ .returns = &.{output} });
 
-        const matched = MirageProvider.match_impl(undefined, func, 0) orelse
+        const matched = MirageProvider.match_connected(func, 0) orelse
             return error.TestUnexpectedResult;
-        try testing.expectEqual(@as(usize, 2), matched.op_count);
+        try testing.expectEqual(@as(usize, 2), matched.len());
     }
 
     {
@@ -464,9 +564,9 @@ test "Mirage matcher covers pointwise prefixes and connected branches" {
         const output = try builder.add(exponent, logarithm);
         const func = try builder.finish(.{ .returns = &.{output} });
 
-        const matched = MirageProvider.match_impl(undefined, func, 0) orelse
+        const matched = MirageProvider.match_connected(func, 0) orelse
             return error.TestUnexpectedResult;
-        try testing.expectEqual(@as(usize, 4), matched.op_count);
+        try testing.expectEqual(@as(usize, 4), matched.len());
     }
 }
 
@@ -485,4 +585,60 @@ test "Mirage recognizes a SiLU composite" {
     const matched = match_silu(func, 0) orelse return error.TestUnexpectedResult;
     try testing.expect(matched.input == input);
     try testing.expect(matched.output == output);
+}
+
+test "Mirage recognizes a gated MLP branch and join" {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+    var builder = try pr.FunctionBuilder.init(&program, "gated_mlp");
+    defer builder.deinit();
+    const input = try builder.param_tensor(.f16, &.{ 8, 4096 });
+    const gate_weight = try builder.param_tensor(.f16, &.{ 4096, 4096 });
+    const up_weight = try builder.param_tensor(.f16, &.{ 4096, 4096 });
+    const gate = try builder.mm(input, gate_weight);
+    const up = try builder.mm(input, up_weight);
+    const activation = try builder.logistic(gate);
+    const silu = try builder.multiply(gate, activation);
+    const output = try builder.multiply(silu, up);
+    const func = try builder.finish(.{ .returns = &.{output} });
+
+    const matched = match_gated_mlp(func, func.ops.len - 1) orelse
+        return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 5), matched.len());
+
+    var matches = std.ArrayList(kernel.Match).empty;
+    defer matches.deinit(testing.allocator);
+    try MirageProvider.discover_impl(undefined, func, &matches, testing.allocator);
+    var found_full = false;
+    var single_matmuls: usize = 0;
+    for (matches.items) |candidate| {
+        found_full = found_full or candidate.start == matched.start and candidate.end == matched.end;
+        if (candidate.len() == 1) single_matmuls += 1;
+    }
+    try testing.expect(found_full);
+    try testing.expectEqual(@as(usize, 2), single_matmuls);
+}
+
+test "Mirage gated MLP matching follows dataflow across branch order" {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+    var builder = try pr.FunctionBuilder.init(&program, "gated_mlp_swapped");
+    defer builder.deinit();
+    const input = try builder.param_tensor(.f16, &.{ 8, 4096 });
+    const gate_weight = try builder.param_tensor(.f16, &.{ 4096, 4096 });
+    const up_weight = try builder.param_tensor(.f16, &.{ 4096, 4096 });
+    const up = try builder.mm(input, up_weight);
+    const gate = try builder.mm(input, gate_weight);
+    const activation = try builder.logistic(gate);
+    const silu = try builder.multiply(activation, gate);
+    const output = try builder.multiply(up, silu);
+    const func = try builder.finish(.{ .returns = &.{output} });
+
+    const matched = match_gated_mlp(func, func.ops.len - 1) orelse
+        return error.TestUnexpectedResult;
+    try testing.expectEqual(pattern.Range{ .start = 0, .end = 5 }, matched);
 }

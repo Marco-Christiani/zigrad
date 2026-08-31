@@ -5,8 +5,9 @@ const artifact_mod = @import("artifact.zig");
 const Artifact = artifact_mod.Artifact;
 const Allocator = std.mem.Allocator;
 
-/// Store key for one kernel selection on one device.
+/// Store key for one candidate occurrence on one device.
 pub const SelectionKey = struct {
+    /// Encoded identity bytes. Ownership follows the enclosing value.
     bytes: []const u8,
 };
 
@@ -15,30 +16,37 @@ pub const ProviderCandidate = struct {
     /// Stable name used to resolve the provider during execution.
     provider_name: []const u8,
 
-    /// Artifact produced by the provider.
+    /// Artifact produced by the provider and owned by the enclosing collection.
     artifact: Artifact,
 };
 
-/// Implementation eligible to satisfy a kernel request.
-pub const Candidate = union(enum) {
-    /// Preserve the original callable PR function.
-    original,
+/// Callable implementation used during measurement or final selection.
+pub const Implementation = union(enum) {
+    /// Use the callable implementation produced by the enclosing compiler.
+    unreplaced,
 
     /// Replace the call with a provider artifact.
     provider: ProviderCandidate,
 };
 
-/// Comparable aggregate timings supporting one selection.
-pub const TimingEvidence = struct {
-    original_ns: u64,
+/// Aggregate target measurements supporting one selection.
+pub const MeasurementEvidence = struct {
+    /// Median latency of the unreplaced callable in nanoseconds.
+    unreplaced_ns: u64,
+    /// Median latency of the provider implementation in nanoseconds.
     selected_ns: u64,
+    /// Probability in `[0, 1]` reported by the resolving policy.
+    p_value: f64,
 };
 
 /// Selected candidate and the reason it was chosen.
 pub const Selection = struct {
-    candidate: Candidate,
+    /// Selected callable implementation.
+    candidate: Implementation,
+    /// Human-readable explanation owned by the enclosing store.
     reason: []const u8,
-    timing: ?TimingEvidence = null,
+    /// Statistical evidence retained when the policy used measurements.
+    measurement: ?MeasurementEvidence = null,
 };
 
 /// Failures produced while storing a selection.
@@ -46,11 +54,12 @@ pub const PutError = Allocator.Error || error{
     SelectionExists,
 };
 
-/// In-memory selections keyed by request, device, and function fingerprint.
+/// In-memory selections keyed by source occurrence and eligible implementations.
 ///
 /// This is the sole selection source used by kernelization. Persistent
 ///  provider caches have a separate lifecycle.
 pub const KernelStore = struct {
+    /// Selections keyed by owned encoded occurrence identities.
     selections: std.StringHashMap(Selection),
 
     /// Initialize an empty selection store.
@@ -73,7 +82,7 @@ pub const KernelStore = struct {
                     self.selections.allocator.free(stored.artifact.data);
                     self.selections.allocator.free(stored.provider_name);
                 },
-                .original => {},
+                .unreplaced => {},
             }
             self.selections.allocator.free(selection.reason);
             self.selections.allocator.free(entry.key_ptr.*);
@@ -87,12 +96,12 @@ pub const KernelStore = struct {
         self: *KernelStore,
         /// Key copied into the store.
         selection_key: SelectionKey,
-        /// Selection copied into the store. A provider artifact transfers its
-        ///  data allocation to the store, including when insertion fails.
+        /// The reason and provider name are copied. Provider artifact data is
+        ///  consumed, retained on success, and freed on error.
         selection: Selection,
     ) PutError!void {
         errdefer switch (selection.candidate) {
-            .original => {},
+            .unreplaced => {},
             .provider => |provider| self.selections.allocator.free(provider.artifact.data),
         };
 
@@ -102,36 +111,46 @@ pub const KernelStore = struct {
         errdefer self.selections.allocator.free(owned_key);
         const owned_reason = try self.selections.allocator.dupe(u8, selection.reason);
         errdefer self.selections.allocator.free(owned_reason);
-        const owned_candidate: Candidate = switch (selection.candidate) {
-            .original => .original,
+        const owned_candidate: Implementation = switch (selection.candidate) {
+            .unreplaced => .unreplaced,
             .provider => |provider| .{ .provider = .{
                 .provider_name = try self.selections.allocator.dupe(u8, provider.provider_name),
                 .artifact = provider.artifact,
             } },
         };
         errdefer switch (owned_candidate) {
-            .original => {},
+            .unreplaced => {},
             .provider => |provider| self.selections.allocator.free(provider.provider_name),
         };
 
         try self.selections.put(owned_key, .{
             .candidate = owned_candidate,
             .reason = owned_reason,
-            .timing = selection.timing,
+            .measurement = selection.measurement,
         });
     }
 
-    /// Look up a selection. Returns null if the key was never evaluated.
-    pub fn get(self: *const KernelStore, selection_key: SelectionKey) ?Selection {
+    /// Look up a selection whose slices remain owned by the store.
+    ///
+    /// Returns null when the key has no selection.
+    pub fn get(
+        self: *const KernelStore,
+        /// Candidate occurrence and device to resolve.
+        selection_key: SelectionKey,
+    ) ?Selection {
         return self.selections.get(selection_key.bytes);
     }
 
-    /// Return whether the request selects a provider artifact.
-    pub fn uses_provider(self: *const KernelStore, selection_key: SelectionKey) bool {
+    /// Return whether a stored selection uses a provider artifact.
+    pub fn uses_provider(
+        self: *const KernelStore,
+        /// Candidate occurrence and device to resolve.
+        selection_key: SelectionKey,
+    ) bool {
         const selection = self.selections.get(selection_key.bytes) orelse return false;
         return switch (selection.candidate) {
             .provider => true,
-            .original => false,
+            .unreplaced => false,
         };
     }
 };
@@ -154,7 +173,11 @@ test "kernel store selects a provider artifact" {
             },
         } },
         .reason = "available",
-        .timing = .{ .original_ns = 120, .selected_ns = 90 },
+        .measurement = .{
+            .unreplaced_ns = 120,
+            .selected_ns = 90,
+            .p_value = 0.01,
+        },
     });
 
     const selection = store.get(key) orelse return error.TestUnexpectedResult;
@@ -165,10 +188,11 @@ test "kernel store selects a provider artifact" {
             try testing.expectEqual(@as(usize, 4096), stored.artifact.workspace_bytes);
             try testing.expectEqual(@as(usize, 128), stored.artifact.workspace_alignment);
         },
-        .original => return error.TestUnexpectedResult,
+        .unreplaced => return error.TestUnexpectedResult,
     }
-    try std.testing.expectEqual(@as(u64, 120), selection.timing.?.original_ns);
-    try std.testing.expectEqual(@as(u64, 90), selection.timing.?.selected_ns);
+    try std.testing.expectEqual(@as(u64, 120), selection.measurement.?.unreplaced_ns);
+    try std.testing.expectEqual(@as(u64, 90), selection.measurement.?.selected_ns);
+    try std.testing.expectEqual(@as(f64, 0.01), selection.measurement.?.p_value);
     try testing.expect(store.uses_provider(key));
 }
 
@@ -191,25 +215,25 @@ test "kernel store takes artifact data without copying" {
     const selection = store.get(key) orelse return error.TestUnexpectedResult;
     switch (selection.candidate) {
         .provider => |stored| try testing.expectEqual(data_ptr, stored.artifact.data.ptr),
-        .original => return error.TestUnexpectedResult,
+        .unreplaced => return error.TestUnexpectedResult,
     }
 }
 
-test "kernel store selects the original candidate" {
+test "kernel store leaves a callable unreplaced" {
     const testing = std.testing;
     const key = SelectionKey{ .bytes = "kp-test:conv_f32_3x3" };
 
     var store = KernelStore.init(testing.allocator);
     defer store.deinit();
     try store.put(key, .{
-        .candidate = .original,
+        .candidate = .unreplaced,
         .reason = "provider does not support the shape",
     });
 
     const selection = store.get(key) orelse return error.TestUnexpectedResult;
     switch (selection.candidate) {
         .provider => return error.TestUnexpectedResult,
-        .original => try testing.expectEqualStrings(
+        .unreplaced => try testing.expectEqualStrings(
             "provider does not support the shape",
             selection.reason,
         ),

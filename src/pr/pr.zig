@@ -654,7 +654,7 @@ pub const AnnotationValue = union(enum) {
 /// A namespaced compiler annotation.
 ///
 /// Annotation names define their own value contracts. PR stores unknown names
-///  without requiring registration in a central set.
+///  without requiring registration in a central registry.
 pub const Annotation = struct {
     /// Namespaced contract name interpreted by an owning pass.
     name: []const u8,
@@ -662,7 +662,7 @@ pub const Annotation = struct {
     value: AnnotationValue,
 };
 
-/// A named set of PR ops with attached steering metadata.
+/// A named group of PR ops with attached steering metadata.
 /// Materialized at `FunctionBuilder.finish()` from the annotation stack by default.
 pub const Region = struct {
     id: u32,
@@ -2279,7 +2279,10 @@ test "region push/pop materializes regions" {
     try std.testing.expectEqual(@as(usize, 1), func.regions.len);
     try std.testing.expectEqual(@as(u32, 0), func.regions[0].id);
     try std.testing.expectEqualStrings("tvm-kernel", func.regions[0].name);
-    try std.testing.expectEqualStrings("tvm", (try kernel.requested_providers(func.regions[0])).?.at(0));
+    try std.testing.expectEqualStrings(
+        "tvm",
+        (try kernel.requested_providers(func.regions[0].annotations)).?.at(0),
+    );
     try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, func.regions[0].op_ids);
 }
 
@@ -2355,7 +2358,10 @@ test "nested regions" {
     // Outer region completed second
     try std.testing.expectEqual(@as(u32, 0), func.regions[1].id);
     try std.testing.expectEqualStrings("outer", func.regions[1].name);
-    try std.testing.expectEqualStrings("tvm", (try kernel.requested_providers(func.regions[1])).?.at(0));
+    try std.testing.expectEqualStrings(
+        "tvm",
+        (try kernel.requested_providers(func.regions[1].annotations)).?.at(0),
+    );
     try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, func.regions[1].op_ids);
 }
 
@@ -2383,7 +2389,7 @@ test "regions_matching filters by predicate" {
 
     const is_kernelized = struct {
         fn f(region: Region) bool {
-            return (kernel.requested_providers(region) catch null) != null;
+            return (kernel.requested_providers(region.annotations) catch null) != null;
         }
     }.f;
 

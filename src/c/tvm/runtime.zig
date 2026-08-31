@@ -127,6 +127,19 @@ pub const Tensor = struct {
     pub const as_value = helpers.as_value_fixed(Tensor, c.kTVMFFITensor);
 };
 
+/// Wait for work on the device's current TVM stream to finish.
+pub fn synchronize(
+    allocator: std.mem.Allocator,
+    device_type: dlpack.DeviceType,
+    device_ordinal: i32,
+) TvmError!void {
+    var result = try api.call_global(allocator, "runtime.Device_StreamSync", &.{
+        device_value(device_type, device_ordinal),
+        Value.int(0),
+    });
+    defer result.decref();
+}
+
 // Private helpers for constructing special Value types needed by Tensor methods.
 
 fn device_value(device_type: dlpack.DeviceType, device_id: i32) Value {

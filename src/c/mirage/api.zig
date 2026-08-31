@@ -53,6 +53,7 @@ pub const SearchPreset = enum {
     default,
     attention,
     lora,
+    mlp,
 };
 
 pub const TensorSpec = struct {
@@ -519,6 +520,7 @@ fn search_preset_to_c(preset: SearchPreset) c_uint {
         .default => c.search_default,
         .attention => c.search_attention,
         .lora => c.search_lora,
+        .mlp => c.search_mlp,
     };
 }
 

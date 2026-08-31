@@ -11,12 +11,12 @@ pub const Range = struct {
     /// Index immediately after the last matched operation.
     end: usize,
 
-    /// Returns the number of operations in the range.
+    /// Return the number of operations in the range.
     pub fn len(self: Range) usize {
         return self.end - self.start;
     }
 
-    /// Returns whether this range contains `operation_index`.
+    /// Return whether this range contains `operation_index`.
     pub fn contains(self: Range, operation_index: usize) bool {
         return operation_index >= self.start and operation_index < self.end;
     }
@@ -33,6 +33,149 @@ pub const BinaryOperandOrder = enum {
     unordered,
 };
 
+/// One operand relationship in a rooted dataflow pattern.
+pub const GraphInput = union(enum) {
+    /// Accept any value at this operand position.
+    any,
+    /// Require one result of another pattern node.
+    node_output: struct {
+        /// Earlier node in the pattern.
+        node: usize,
+        /// Result position produced by `node`.
+        result: usize = 0,
+    },
+};
+
+/// Operation and input relationships for one rooted dataflow-pattern node.
+pub const GraphNode = struct {
+    /// Local operation constraints.
+    operation: Operation,
+    /// Operand relationships. An empty slice leaves operands unconstrained.
+    inputs: []const GraphInput = &.{},
+    /// Operand ordering. Unordered matching requires exactly two inputs.
+    input_order: BinaryOperandOrder = .ordered,
+};
+
+/// Rooted dataflow pattern with caller-provided capture storage.
+///
+/// Node references point to earlier nodes, making the pattern acyclic by
+///  construction. Matching follows operands from `root` and does not depend on
+///  source operation order. The matcher recursively follows use-to-definition
+///  edges and backtracks only when trying both orders of a binary node. Graphs
+///  contain at most 64 nodes.
+pub const Graph = struct {
+    /// Pattern nodes in dependency order.
+    nodes: []const GraphNode,
+    /// Node matched against the supplied root operation.
+    root: usize,
+
+    /// Match `root_op` and write one captured operation per pattern node.
+    ///
+    /// `captures` must have `nodes.len` elements. It is cleared when matching
+    ///  fails.
+    pub fn match(
+        self: Graph,
+        /// Operation matched against the root node.
+        root_op: *const pr.Op,
+        /// Storage for one captured operation per node.
+        captures: []?*const pr.Op,
+    ) bool {
+        if (self.nodes.len == 0 or self.nodes.len > max_graph_nodes or
+            self.root >= self.nodes.len or captures.len != self.nodes.len)
+        {
+            return false;
+        }
+        @memset(captures, null);
+        if (!match_graph_node(self, self.root, root_op, captures)) {
+            @memset(captures, null);
+            return false;
+        }
+        for (captures) |captured| if (captured == null) {
+            @memset(captures, null);
+            return false;
+        };
+        return true;
+    }
+};
+
+const max_graph_nodes = 64;
+
+fn match_graph_node(
+    graph: Graph,
+    node_index: usize,
+    op: *const pr.Op,
+    captures: []?*const pr.Op,
+) bool {
+    if (captures[node_index]) |captured| return captured == op;
+    const node = graph.nodes[node_index];
+    if (!node.operation.matches(op)) return false;
+    if (node.inputs.len != 0 and node.inputs.len != op.inputs.len) return false;
+
+    captures[node_index] = op;
+    if (node.inputs.len == 0) return true;
+
+    return switch (node.input_order) {
+        .ordered => match_graph_inputs(graph, node_index, op, node.inputs, captures),
+        .unordered => blk: {
+            if (node.inputs.len != 2) break :blk false;
+            var saved: [max_graph_nodes]?*const pr.Op = undefined;
+            @memcpy(saved[0..graph.nodes.len], captures);
+            if (match_graph_inputs(graph, node_index, op, node.inputs, captures))
+                break :blk true;
+
+            @memcpy(captures, saved[0..graph.nodes.len]);
+            const swapped = [_]GraphInput{ node.inputs[1], node.inputs[0] };
+            break :blk match_graph_inputs(graph, node_index, op, &swapped, captures);
+        },
+    };
+}
+
+fn match_graph_inputs(
+    graph: Graph,
+    owner_index: usize,
+    op: *const pr.Op,
+    expected: []const GraphInput,
+    captures: []?*const pr.Op,
+) bool {
+    for (op.inputs, expected) |operand, input| switch (input) {
+        .any => {},
+        .node_output => |reference| {
+            if (reference.node >= owner_index) return false;
+            const producer = operand.value.defining_op orelse return false;
+            if (!match_graph_node(graph, reference.node, producer, captures)) return false;
+            if (reference.result >= producer.outputs.len or
+                producer.outputs[reference.result] != operand.value) return false;
+        },
+    };
+    return true;
+}
+
+/// Return the contiguous range containing exactly the captured operations.
+///
+/// Returns null when a capture is missing, duplicated, absent from `func`, or
+///  separated by an operation outside the match.
+pub fn dense_range(
+    /// Function expected to contain every captured operation.
+    func: pr.Function,
+    /// One captured operation per graph node.
+    captures: []const ?*const pr.Op,
+) ?Range {
+    if (captures.len == 0) return null;
+    var start = func.ops.len;
+    var end: usize = 0;
+    for (captures, 0..) |maybe_op, capture_index| {
+        const op = maybe_op orelse return null;
+        const index = func.op_index_by_id(op.id) orelse return null;
+        for (captures[0..capture_index]) |prior| {
+            if (prior.? == op) return null;
+        }
+        start = @min(start, index);
+        end = @max(end, index + 1);
+    }
+    if (end - start != captures.len) return null;
+    return .{ .start = start, .end = end };
+}
+
 /// Common local constraints for one operation.
 pub const Operation = struct {
     /// Required operation primitive.
@@ -46,7 +189,7 @@ pub const Operation = struct {
     /// Required rank of the first result.
     first_output_rank: ?usize = null,
 
-    /// Returns whether an operation satisfies every specified constraint.
+    /// Return whether an operation satisfies every specified constraint.
     pub fn matches(
         self: Operation,
         /// Borrowed operation to test. This function stores no pointers.
@@ -131,7 +274,7 @@ pub fn sequence(
     return .{ .start = start, .end = start + expected.len };
 }
 
-/// Returns whether a binary operation consumes two expected values.
+/// Return whether a binary operation consumes two expected values.
 pub fn binary_operands(
     /// Operation to inspect. Operations with another arity return false.
     op: *const pr.Op,
@@ -152,7 +295,7 @@ pub fn binary_operands(
     };
 }
 
-/// Returns whether an operation consumes a value defined inside a range.
+/// Return whether an operation consumes a value defined inside a range.
 pub fn consumes_range(
     /// Function that owns both the operation and range.
     func: pr.Function,
@@ -267,6 +410,76 @@ test Operation {
         .first_output_rank = 2,
     }).matches(func.ops[0]));
     try testing.expect(!(Operation{ .primitive = .add }).matches(func.ops[0]));
+}
+
+test "Graph matches branch dataflow independently of source order" {
+    const std = @import("std");
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+    var builder = try pr.FunctionBuilder.init(&program, "gated");
+    defer builder.deinit();
+    const input = try builder.param_tensor(.f16, &.{ 8, 32 });
+    const gate_weight = try builder.param_tensor(.f16, &.{ 32, 64 });
+    const up_weight = try builder.param_tensor(.f16, &.{ 32, 64 });
+    const up = try builder.mm(input, up_weight);
+    const gate = try builder.mm(input, gate_weight);
+    const activation = try builder.logistic(gate);
+    const silu = try builder.multiply(activation, gate);
+    const output = try builder.multiply(up, silu);
+    const func = try builder.finish(.{ .returns = &.{output} });
+
+    const graph = Graph{
+        .nodes = &.{
+            .{ .operation = .{ .primitive = .mm, .input_count = 2, .output_count = 1 } },
+            .{ .operation = .{ .primitive = .mm, .input_count = 2, .output_count = 1 } },
+            .{
+                .operation = .{ .primitive = .logistic, .input_count = 1, .output_count = 1 },
+                .inputs = &.{.{ .node_output = .{ .node = 0 } }},
+            },
+            .{
+                .operation = .{ .primitive = .multiply, .input_count = 2, .output_count = 1 },
+                .inputs = &.{
+                    .{ .node_output = .{ .node = 0 } },
+                    .{ .node_output = .{ .node = 2 } },
+                },
+                .input_order = .unordered,
+            },
+            .{
+                .operation = .{ .primitive = .multiply, .input_count = 2, .output_count = 1 },
+                .inputs = &.{
+                    .{ .node_output = .{ .node = 3 } },
+                    .{ .node_output = .{ .node = 1 } },
+                },
+                .input_order = .unordered,
+            },
+        },
+        .root = 4,
+    };
+    var captures: [5]?*const pr.Op = undefined;
+    try testing.expect(graph.match(output.defining_op.?, &captures));
+    try testing.expect(captures[0] == gate.defining_op.?);
+    try testing.expect(captures[1] == up.defining_op.?);
+    try testing.expectEqual(Range{ .start = 0, .end = 5 }, dense_range(func, &captures).?);
+}
+
+test "dense_range rejects interleaved operations" {
+    const std = @import("std");
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+    var builder = try pr.FunctionBuilder.init(&program, "interleaved");
+    defer builder.deinit();
+    const input = try builder.param_tensor(.f32, &.{4});
+    const first = try builder.exp(input);
+    _ = try builder.log(input);
+    const second = try builder.add(first, input);
+    const func = try builder.finish(.{ .returns = &.{second} });
+
+    const captures = [_]?*const pr.Op{ first.defining_op.?, second.defining_op.? };
+    try testing.expect(dense_range(func, &captures) == null);
 }
 
 test "value-use and operand relationships" {

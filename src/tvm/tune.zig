@@ -1,7 +1,6 @@
 //! MetaSchedule autotuning for TVM.
 //!
-//! Runs TVM's MetaSchedule search to find optimal schedules for a given
-//!  IRModule and target.
+//! Runs TVM's MetaSchedule search for a given IRModule and target.
 //! Uses a random cost model with evolutionary search.
 //! Builder and runner callbacks receive provider state through TVM's
 //!  userdata pointer.
@@ -64,24 +63,30 @@ const TuneState = struct {
     device_ordinal: i32,
     work_cache: Cache,
     build_counter: u32 = 0,
-    /// Counter value at the start of this tuning run (before any new candidates).
+    /// First candidate index available for this tuning run.
     initial_counter: u32 = 0,
     max_trials: u32,
     /// Tensor shapes for the workload (A, B, C for matmul).
     tensor_shapes: []const []const i64,
 };
 
-/// Tune an IRModule via MetaSchedule, returning the tuned IRModule.
+/// Run MetaSchedule and persist measured tuning records in the workload cache.
 ///
 /// Runs evolutionary search with a random cost model. The builder callback
-///  compiles TIR candidates to .so artifacts, the runner callback loads and
-///  benchmarks them. Results are persisted to a JSON store in work_dir.
+///  compiles TIR candidates to shared libraries. The runner callback loads and
+///  benchmarks them. Results are persisted in `opts.work_cache`.
 pub fn tune(
+    /// I/O context used by filesystem and timing operations.
     io: std.Io,
+    /// Allocator used for TVM API and callback state.
     allocator: std.mem.Allocator,
+    /// TIR module supplied to MetaSchedule.
     ir_mod: IRModule,
+    /// TVM compilation target.
     target: Target,
+    /// Input and output tensor shapes used by the runner.
     tensor_shapes: []const []const i64,
+    /// Compiler, device, cache, and search limits.
     opts: TuneOpts,
 ) !void {
     try integration_runtime.ensure_loaded(.compiler);
@@ -459,15 +464,21 @@ fn benchmark_kernel(state: *TuneState, func: c.TVMFFIObjectHandle) !f64 {
         call_args[j] = t.as_value();
     }
 
-    // Warmup
-    _ = try api.call_handle(allocator, func, call_args);
+    // Warmup and synchronize before collecting host-side timings.
+    var warmup_result = try api.call_handle(allocator, func, call_args);
+    defer warmup_result.decref();
+    try runtime.synchronize(allocator, dev_type, state.device_ordinal);
 
     // Timed runs (5 iterations, take median)
     const num_runs: usize = 5;
     var times: [5]f64 = std.mem.zeroes([5]f64);
     for (0..num_runs) |run_idx| {
         const start = std.Io.Timestamp.now(io, .awake);
-        _ = try api.call_handle(allocator, func, call_args);
+        {
+            var call_result = try api.call_handle(allocator, func, call_args);
+            defer call_result.decref();
+        }
+        try runtime.synchronize(allocator, dev_type, state.device_ordinal);
         const elapsed = start.untilNow(io, .awake);
         times[run_idx] = @as(f64, @floatFromInt(elapsed.toNanoseconds())) / 1e9;
     }

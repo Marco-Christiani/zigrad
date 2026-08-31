@@ -150,6 +150,7 @@ typedef enum zg_mirage_search_preset {
   ZG_MIRAGE_SEARCH_DEFAULT = 0,
   ZG_MIRAGE_SEARCH_ATTENTION = 1,
   ZG_MIRAGE_SEARCH_LORA = 2,
+  ZG_MIRAGE_SEARCH_MLP = 3,
 } zg_mirage_search_preset_t;
 
 typedef struct zg_mirage_optimize_options {

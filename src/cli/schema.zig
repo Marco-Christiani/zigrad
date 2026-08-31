@@ -191,11 +191,30 @@ const demo_backend_options = [_]Option{.{
     .choices = &.{ "pjrt", "iree" },
 }};
 
-const kernel_provider_options = [_]Option{.{
-    .long_name = "provider",
-    .description = "Select comma-separated kernel provider names",
-    .value_name = "NAMES",
-}};
+const kernel_provider_options = [_]Option{
+    .{
+        .long_name = "provider",
+        .description = "Select comma-separated kernel provider names",
+        .value_name = "NAMES",
+    },
+    .{
+        .long_name = "shape",
+        .description = "Set matmul dimensions in MxNxK form",
+        .value_name = "MxNxK",
+    },
+    .{
+        .long_name = "dtype",
+        .description = "Set the candidate region element data type",
+        .value_name = "DTYPE",
+        .choices = &.{ "f16", "bf16", "f32" },
+    },
+    .{
+        .long_name = "pattern",
+        .description = "Select the candidate graph family",
+        .value_name = "PATTERN",
+        .choices = &.{ "epilogue", "mlp" },
+    },
+};
 
 const train_options = demo_backend_options ++ [_]Option{
     .{
