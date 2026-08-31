@@ -48,6 +48,31 @@ fn make_named_value_int64(name: []const u8, value: i64) c.PJRT_NamedValue {
     return out;
 }
 
+fn make_named_value_float(name: []const u8, value: f32) c.PJRT_NamedValue {
+    var out: c.PJRT_NamedValue = std.mem.zeroes(c.PJRT_NamedValue);
+    out.struct_size = pjrt_struct_size(c.PJRT_NamedValue);
+    out.extension_start = null;
+    out.name = name.ptr;
+    out.name_size = name.len;
+    out.type = c.PJRT_NamedValue_kFloat;
+    out.unnamed_0.float_value = value;
+    out.value_size = 1;
+    return out;
+}
+
+test make_named_value_float {
+    const option = make_named_value_float("memory_fraction", 0.5);
+    try std.testing.expectEqual(
+        @as(@TypeOf(option.type), @intCast(c.PJRT_NamedValue_kFloat)),
+        option.type,
+    );
+    try std.testing.expectEqual(@as(f32, 0.5), option.unnamed_0.float_value);
+    try std.testing.expectEqualStrings(
+        "memory_fraction",
+        option.name[0..option.name_size],
+    );
+}
+
 pub const Client = struct {
     api: *Api,
     pjrt_client: *c.PJRT_Client,
@@ -81,8 +106,22 @@ pub const Client = struct {
         };
     }
 
-    pub fn create_cpu_with_device_count(api: *Api, cpu_device_count: usize) !Client {
+    /// Create an XLA CPU client exposing `cpu_device_count` logical devices.
+    pub fn create_cpu_with_device_count(api: *Api, cpu_device_count: u32) !Client {
+        std.debug.assert(cpu_device_count > 0);
         const option = make_named_value_int64("cpu_device_count", @intCast(cpu_device_count));
+        const options = [_]c.PJRT_NamedValue{option};
+        return try create_with_options(api, options[0..]);
+    }
+
+    /// Create an XLA GPU client using the selected allocator memory fraction.
+    pub fn create_xla_gpu_with_memory_fraction(
+        api: *Api,
+        memory_fraction: f32,
+    ) !Client {
+        std.debug.assert(std.math.isFinite(memory_fraction));
+        std.debug.assert(memory_fraction > 0);
+        const option = make_named_value_float("memory_fraction", memory_fraction);
         const options = [_]c.PJRT_NamedValue{option};
         return try create_with_options(api, options[0..]);
     }

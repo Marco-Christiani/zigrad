@@ -58,10 +58,17 @@ pub const Client = struct {
         api_ptr.* = try plugin.load_plugin(plugin_path, options.plugin);
         errdefer plugin.unload_plugin(api_ptr.*, options.plugin);
 
-        var client = if (options.cpu_device_count) |count|
-            try pjrt_types.Client.create_cpu_with_device_count(api_ptr, count)
-        else
-            try pjrt_types.Client.create(api_ptr);
+        var client = switch (options.client) {
+            .default => try pjrt_types.Client.create(api_ptr),
+            .xla_cpu => |cpu| try pjrt_types.Client.create_cpu_with_device_count(
+                api_ptr,
+                cpu.device_count,
+            ),
+            .xla_gpu => |gpu| try pjrt_types.Client.create_xla_gpu_with_memory_fraction(
+                api_ptr,
+                gpu.memory_fraction,
+            ),
+        };
         errdefer client.deinit();
 
         const platform = device_mod.Platform{
